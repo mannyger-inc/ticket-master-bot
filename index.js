@@ -94,21 +94,29 @@ const AGENT_BY_EMAIL = {};
 AGENTS.forEach(a => { AGENT_BY_EMAIL[a.email.toLowerCase()] = a; });
 
 // ── Google Auth (hand-rolled JWT — no googleapis package) ─────────────────
+function toBase64Url(buf) {
+  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+
 async function getGoogleAccessToken() {
-  const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
+  const header = toBase64Url(Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })));
   const now    = Math.floor(Date.now() / 1000);
-  const claim  = Buffer.from(JSON.stringify({
+  const claim  = toBase64Url(Buffer.from(JSON.stringify({
     iss:   GCP_EMAIL,
     scope: 'https://www.googleapis.com/auth/spreadsheets',
     aud:   'https://oauth2.googleapis.com/token',
     exp:   now + 3600,
     iat:   now,
-  })).toString('base64url');
+  })));
 
+  const sigInput = `${header}.${claim}`;
   const sign = crypto.createSign('RSA-SHA256');
-  sign.update(`${header}.${claim}`);
-  const sig = sign.sign(GCP_KEY, 'base64url');
-  const jwt = `${header}.${claim}.${sig}`;
+  sign.update(sigInput);
+
+  // Explicit key object — avoids OpenSSL version-dependent PEM parsing issues
+  const privateKey = { key: GCP_KEY, format: 'pem', type: 'pkcs8' };
+  const sig = toBase64Url(sign.sign(privateKey));
+  const jwt = `${sigInput}.${sig}`;
 
   const res  = await fetch('https://oauth2.googleapis.com/token', {
     method:  'POST',
