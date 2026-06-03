@@ -506,10 +506,31 @@ app.post('/eod', async (req, res) => {
   runEOD();
 });
 
-// One-time setup: write headers to all three sheet tabs
+// One-time setup: create 3 tabs, delete default Sheet1, write headers
 app.post('/setup', async (req, res) => {
   try {
     const token = await getGoogleAccessToken();
+
+    // Step 1 — create the 3 named tabs via Sheets batchUpdate
+    const batchRes = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}:batchUpdate`,
+      {
+        method:  'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          requests: [
+            { addSheet: { properties: { title: 'Daily Queue Log',   index: 0 } } },
+            { addSheet: { properties: { title: 'Agent Daily Stats', index: 1 } } },
+            { addSheet: { properties: { title: 'Ticket Type Log',   index: 2 } } },
+            { deleteSheet: { sheetId: 0 } },  // remove the default "Sheet1"
+          ],
+        }),
+      }
+    );
+    const batchData = await batchRes.json();
+    if (batchData.error) throw new Error('batchUpdate: ' + JSON.stringify(batchData.error));
+
+    // Step 2 — write column headers to each tab
     await sheetsUpdate(token, 'Daily Queue Log!A1:H1', [[
       'Date', 'Day', 'UA-All SOD', 'UA-New SOD', 'Open SOD',
       'UA-All EOD', 'UA-New EOD', 'Open EOD',
@@ -521,7 +542,8 @@ app.post('/setup', async (req, res) => {
     await sheetsUpdate(token, 'Ticket Type Log!A1:C1', [[
       'Date', 'Ticket Type', 'Count',
     ]]);
-    res.json({ ok: true, message: 'Headers written to all 3 tabs' });
+
+    res.json({ ok: true, message: '3 tabs created, Sheet1 deleted, headers written.' });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
