@@ -2,7 +2,8 @@
 
 const express = require('express');
 const cron    = require('node-cron');
-const crypto  = require('crypto');
+const { webcrypto } = require('crypto');
+const { subtle } = webcrypto;
 
 // node-fetch v3 is ESM-only; use dynamic import
 const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
@@ -93,31 +94,36 @@ const AGENTS = [
 const AGENT_BY_EMAIL = {};
 AGENTS.forEach(a => { AGENT_BY_EMAIL[a.email.toLowerCase()] = a; });
 
-// ── Google Auth (hand-rolled JWT — no googleapis package) ─────────────────
-function toBase64Url(buf) {
-  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+// ── Google Auth (WebCrypto — matches all working bots) ────────────────────
+function stripPem(raw) {
+  return String(raw || '')
+    .replace(/-----BEGIN[^-]*-----/g, '')
+    .replace(/-----END[^-]*-----/g, '')
+    .replace(/\\n/g, '')
+    .replace(/\n/g, '')
+    .replace(/\r/g, '')
+    .replace(/\s/g, '');
 }
 
 async function getGoogleAccessToken() {
-  const header = toBase64Url(Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })));
+  const derBuffer = Buffer.from(stripPem(process.env.GOOGLE_PRIVATE_KEY || ''), 'base64');
+  const cryptoKey = await subtle.importKey(
+    'pkcs8', derBuffer,
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false, ['sign']
+  );
   const now    = Math.floor(Date.now() / 1000);
-  const claim  = toBase64Url(Buffer.from(JSON.stringify({
+  const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
+  const claim  = Buffer.from(JSON.stringify({
     iss:   GCP_EMAIL,
     scope: 'https://www.googleapis.com/auth/spreadsheets',
     aud:   'https://oauth2.googleapis.com/token',
     exp:   now + 3600,
     iat:   now,
-  })));
-
-  const sigInput = `${header}.${claim}`;
-  const sign = crypto.createSign('RSA-SHA256');
-  sign.update(sigInput);
-
-  // Explicit key object — avoids OpenSSL version-dependent PEM parsing issues
-  const privateKey = { key: GCP_KEY, format: 'pem', type: 'pkcs8' };
-  const sig = toBase64Url(sign.sign(privateKey));
-  const jwt = `${sigInput}.${sig}`;
-
+  })).toString('base64url');
+  const signingInput = `${header}.${claim}`;
+  const sigBuffer    = await subtle.sign('RSASSA-PKCS1-v1_5', cryptoKey, Buffer.from(signingInput));
+  const jwt          = `${signingInput}.${Buffer.from(sigBuffer).toString('base64url')}`;
   const res  = await fetch('https://oauth2.googleapis.com/token', {
     method:  'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
