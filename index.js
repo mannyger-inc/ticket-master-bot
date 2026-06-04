@@ -168,22 +168,19 @@ function getDayName() {
 
 // Fetch ticket queue counts for SOD / EOD snapshot
 async function fetchQueueCounts() {
-  // Use view count API for accurate active-ticket counts (same as KB widgets).
-  // Plain 'assignee:none' search returns all-time unassigned incl. solved/closed.
-  // View 1260869268789 = Unassigned | View 360199604211 = All Open
-  const viewData = await zdFetch('/api/v2/views/count_many.json?ids=1260869268789,360199604211');
+  // Use view count API to match exactly what supervisors see in Zendesk.
+  // 1260869268789 = Unassigned Tickets (all - by date)
+  // 114130848912  = Unassigned Tickets (Round Robin)
+  // 360199604211  = All Open
+  const viewData = await zdFetch('/api/v2/views/count_many.json?ids=1260869268789,114130848912,360199604211');
   const viewCounts = {};
   (viewData.view_counts || []).forEach(v => {
     viewCounts[String(v.view_id)] = typeof v.value === 'number' ? v.value : 0;
   });
-
-  // Unassigned-new via search, scoped to active tickets only
-  const unassignedNew = await zdSearchCount('type:ticket assignee:none status:new');
-
   return {
-    unassignedAll: viewCounts['1260869268789'] ?? 0,
-    unassignedNew,
-    open: viewCounts['360199604211'] ?? 0,
+    unassignedDate: viewCounts['1260869268789'] ?? 0,
+    unassignedRR:   viewCounts['114130848912']  ?? 0,
+    open:           viewCounts['360199604211']  ?? 0,
   };
 }
 
@@ -352,7 +349,7 @@ async function runSOD() {
     const token = await getGoogleAccessToken();
     await sheetsAppend(token, 'Daily Queue Log!A:H', [[
       date, day,
-      counts.unassignedAll, counts.unassignedNew, counts.open,
+      counts.unassignedDate, counts.unassignedRR, counts.open,
       '', '', '',
     ]]);
     console.log('[SOD] Sheets updated');
@@ -362,9 +359,9 @@ async function runSOD() {
       `🌅 *SOD — ${day}, ${date}*`,
       '',
       `🎫 *Ticket Queue at 9:00 AM*`,
-      `  Unassigned (all): *${counts.unassignedAll}*`,
-      `  Unassigned (new): *${counts.unassignedNew}*`,
-      `  Open:             *${counts.open}*`,
+      `  Unassigned (by date):    *${counts.unassignedDate}*`,
+      `  Unassigned (round robin): *${counts.unassignedRR}*`,
+      `  Open:                    *${counts.open}*`,
     ].join('\n');
 
     await sendSlackDM(msg);
@@ -396,13 +393,13 @@ async function runEOD() {
     const rowNum = await findTodayRow(token);
     if (rowNum) {
       await sheetsUpdate(token, `Daily Queue Log!F${rowNum}:H${rowNum}`, [[
-        counts.unassignedAll, counts.unassignedNew, counts.open,
+        counts.unassignedDate, counts.unassignedRR, counts.open,
       ]]);
     } else {
       // SOD row missing — create a full row
       await sheetsAppend(token, 'Daily Queue Log!A:H', [[
         date, day, '', '', '',
-        counts.unassignedAll, counts.unassignedNew, counts.open,
+        counts.unassignedDate, counts.unassignedRR, counts.open,
       ]]);
     }
 
@@ -445,9 +442,9 @@ async function runEOD() {
         const row = (sodData.values || [[]])[0];
         if (row && row.length >= 3) {
           sodCounts = {
-            unassignedAll: Number(row[0]) || 0,
-            unassignedNew: Number(row[1]) || 0,
-            open:          Number(row[2]) || 0,
+            unassignedDate: Number(row[0]) || 0,
+            unassignedRR:   Number(row[1]) || 0,
+            open:           Number(row[2]) || 0,
           };
         }
       } catch (e) { console.log('[EOD] Could not read SOD row:', e.message); }
@@ -460,13 +457,13 @@ async function runEOD() {
     ];
 
     if (sodCounts) {
-      lines.push(`  Unassigned (all): ${formatDelta(sodCounts.unassignedAll, counts.unassignedAll)}`);
-      lines.push(`  Unassigned (new): ${formatDelta(sodCounts.unassignedNew, counts.unassignedNew)}`);
-      lines.push(`  Open:             ${formatDelta(sodCounts.open, counts.open)}`);
+      lines.push(`  Unassigned (by date):    ${formatDelta(sodCounts.unassignedDate, counts.unassignedDate)}`);
+      lines.push(`  Unassigned (round robin): ${formatDelta(sodCounts.unassignedRR, counts.unassignedRR)}`);
+      lines.push(`  Open:                    ${formatDelta(sodCounts.open, counts.open)}`);
     } else {
-      lines.push(`  Unassigned (all): *${counts.unassignedAll}*`);
-      lines.push(`  Unassigned (new): *${counts.unassignedNew}*`);
-      lines.push(`  Open:             *${counts.open}*`);
+      lines.push(`  Unassigned (by date):    *${counts.unassignedDate}*`);
+      lines.push(`  Unassigned (round robin): *${counts.unassignedRR}*`);
+      lines.push(`  Open:                    *${counts.open}*`);
     }
 
     // Agent activity table
@@ -569,6 +566,26 @@ app.post('/setup', async (req, res) => {
     ]]);
 
     res.json({ ok: true, message: '3 tabs created, Sheet1 deleted, headers written.' });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// One-time endpoint to update sheet headers + clear stale SOD test row
+app.post('/fix-headers', async (req, res) => {
+  try {
+    const token = await getGoogleAccessToken();
+    // Update header row with correct column names
+    await sheetsUpdate(token, 'Daily Queue Log!A1:H1', [[
+      'Date', 'Day',
+      'UA-Date SOD', 'UA-RR SOD', 'Open SOD',
+      'UA-Date EOD', 'UA-RR EOD', 'Open EOD',
+    ]]);
+    // Clear data rows (keep header, wipe rows 2 onward)
+    await sheetsUpdate(token, 'Daily Queue Log!A2:H100', [
+      Array(8).fill(''),
+    ]);
+    res.json({ ok: true, message: 'Headers updated and data rows cleared.' });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
