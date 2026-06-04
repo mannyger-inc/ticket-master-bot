@@ -168,12 +168,23 @@ function getDayName() {
 
 // Fetch ticket queue counts for SOD / EOD snapshot
 async function fetchQueueCounts() {
-  const [unassignedAll, unassignedNew, open] = await Promise.all([
-    zdSearchCount('type:ticket assignee:none'),
-    zdSearchCount('type:ticket assignee:none status:new'),
-    zdSearchCount('type:ticket status:open'),
-  ]);
-  return { unassignedAll, unassignedNew, open };
+  // Use view count API for accurate active-ticket counts (same as KB widgets).
+  // Plain 'assignee:none' search returns all-time unassigned incl. solved/closed.
+  // View 1260869268789 = Unassigned | View 360199604211 = All Open
+  const viewData = await zdFetch('/api/v2/views/count_many.json?ids=1260869268789,360199604211');
+  const viewCounts = {};
+  (viewData.view_counts || []).forEach(v => {
+    viewCounts[String(v.view_id)] = typeof v.value === 'number' ? v.value : 0;
+  });
+
+  // Unassigned-new via search, scoped to active tickets only
+  const unassignedNew = await zdSearchCount('type:ticket assignee:none status:new');
+
+  return {
+    unassignedAll: viewCounts['1260869268789'] ?? 0,
+    unassignedNew,
+    open: viewCounts['360199604211'] ?? 0,
+  };
 }
 
 // Fetch ALL tickets solved today (paginated, up to 2000)
@@ -567,3 +578,4 @@ app.get('/health', (_req, res) => res.json({ ok: true, bot: 'ticket-master-bot' 
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`[ticket-master-bot] Listening on port ${PORT}`));
+
