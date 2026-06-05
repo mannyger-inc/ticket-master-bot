@@ -240,14 +240,29 @@ function analyzeTickets(tickets, idToEmail) {
 
   const typeCount = {};
 
+  // Track channel distribution for debugging chat detection
+  const channelDist = {};
+
   for (const t of tickets) {
+    const rawCh = (t.via && t.via.channel) || '(none)';
+    channelDist[rawCh] = (channelDist[rawCh] || 0) + 1;
+
     // ── Per-agent channel breakdown ──
     const assigneeEmail = idToEmail[String(t.assignee_id)] || null;
     if (assigneeEmail && agentStats[assigneeEmail]) {
-      const channel = (t.via && t.via.channel) || 'email';
-      if      (channel === 'voice') agentStats[assigneeEmail].calls++;
-      else if (channel === 'chat')  agentStats[assigneeEmail].chats++;
-      else                          agentStats[assigneeEmail].emails++;
+      const channel = (t.via && t.via.channel) || '';
+      const ch = channel.toLowerCase();
+      if (ch === 'voice') {
+        agentStats[assigneeEmail].calls++;
+      } else if (
+        ch === 'chat' || ch === 'messaging' || ch === 'native_messaging' ||
+        ch === 'sunshine_conversations_api' ||
+        ch.includes('chat') || ch.includes('messag')
+      ) {
+        agentStats[assigneeEmail].chats++;
+      } else {
+        agentStats[assigneeEmail].emails++;
+      }
 
       // Track closed sales (cs_closed_sale tag)
       if (Array.isArray(t.tags) && t.tags.includes('cs_closed_sale')) {
@@ -264,7 +279,7 @@ function analyzeTickets(tickets, idToEmail) {
     }
   }
 
-  return { agentStats, typeCount };
+  return { agentStats, typeCount, channelDist };
 }
 
 // ── Google Sheets helpers ─────────────────────────────────────────────────
@@ -540,6 +555,7 @@ async function warmTodayStatsCache() {
       total:       tickets.length,
       typeCounts:  typeCount,
       agentStats:  agentRows,
+      channelDist, // temporary debug field — shows raw via.channel distribution
       lastUpdated: new Date().toISOString(),
     };
     todayStatsCacheTime = Date.now();
