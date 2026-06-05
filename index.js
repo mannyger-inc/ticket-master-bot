@@ -588,6 +588,54 @@ app.post('/fix-headers', async (req, res) => {
   }
 });
 
+// /today-stats — KB widget data source (CORS-enabled, cached 5 min)
+let todayStatsCache     = null;
+let todayStatsCacheTime = 0;
+const TODAY_STATS_TTL   = 5 * 60 * 1000;
+
+app.get('/today-stats', async (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET');
+  try {
+    const now = Date.now();
+    if (todayStatsCache && (now - todayStatsCacheTime) < TODAY_STATS_TTL) {
+      return res.json(todayStatsCache);
+    }
+    const tickets   = await fetchSolvedToday();
+    const idToEmail = await resolveAssigneeEmails(tickets);
+    const { agentStats, typeCount } = analyzeTickets(tickets, idToEmail);
+
+    // Build clean response: only agents with activity
+    const agentRows = {};
+    Object.entries(agentStats).forEach(([email, s]) => {
+      const total = s.calls + s.chats + s.emails;
+      if (total > 0 || s.sales > 0) {
+        agentRows[email] = {
+          name:   s.name,
+          supervisor: s.supervisor,
+          calls:  s.calls,
+          chats:  s.chats,
+          emails: s.emails,
+          sales:  s.sales,
+          total,
+        };
+      }
+    });
+
+    todayStatsCache = {
+      total:      tickets.length,
+      typeCounts: typeCount,
+      agentStats: agentRows,
+      lastUpdated: new Date().toISOString(),
+    };
+    todayStatsCacheTime = now;
+    res.json(todayStatsCache);
+  } catch (e) {
+    console.error('[today-stats]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/health', (_req, res) => res.json({ ok: true, bot: 'ticket-master-bot' }));
 
 const PORT = process.env.PORT || 3000;
