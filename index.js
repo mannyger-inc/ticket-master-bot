@@ -323,7 +323,7 @@ async function sendSlackDM(text) {
   const msgRes = await fetch('https://slack.com/api/chat.postMessage', {
     method:  'POST',
     headers: { Authorization: `Bearer ${SLACK_TOKEN}`, 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ channel: dm.channel.id, text, mrkdwn: true }),
+    body:    JSON.stringify({ channel: dm.channel.id, text, mrkdwn: true, username: 'Ticket Master Bot', icon_emoji: ':bar_chart:' }),
   });
   const msg = await msgRes.json();
   if (!msg.ok) throw new Error('chat.postMessage failed: ' + msg.error);
@@ -496,12 +496,9 @@ async function runEOD() {
       lines.push('');
       lines.push('🏷️ *Ticket Types Today*');
       const maxType = Math.max(...topTypes.map(([t]) => t.length));
-      topTypes.slice(0, 12).forEach(([type, count]) => {
+      topTypes.forEach(([type, count]) => {
         lines.push(`  ${type.padEnd(maxType)}  *${count}*`);
       });
-      if (topTypes.length > 12) {
-        lines.push(`  _+ ${topTypes.length - 12} more..._`);
-      }
     }
 
     await sendSlackDM(lines.join('\n'));
