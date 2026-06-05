@@ -184,6 +184,22 @@ async function fetchQueueCounts() {
   };
 }
 
+// Returns true if an ISO timestamp falls within 8:00 AM - 5:00 PM Guadalajara time.
+// Used to reclassify after-hours chats as emails.
+function isBusinessHoursGDL(isoTimestamp) {
+  if (!isoTimestamp) return true; // default to in-hours if unknown
+  const d = new Date(isoTimestamp);
+  const hour = parseInt(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Mexico_City',
+      hour: 'numeric',
+      hour12: false,
+    }).format(d),
+    10
+  );
+  return hour >= 8 && hour < 17;
+}
+
 // Fetch ALL tickets solved today (paginated, up to 2000)
 async function fetchSolvedToday() {
   const date    = getGuadalajaraDate();
@@ -252,15 +268,16 @@ function analyzeTickets(tickets, idToEmail) {
     if (assigneeEmail && agentStats[assigneeEmail]) {
       const channel = (t.via && t.via.channel) || '';
       const ch = channel.toLowerCase();
+      const isChat = ch === 'chat' || ch === 'messaging' || ch === 'native_messaging' ||
+        ch === 'sunshine_conversations_api' ||
+        ch.includes('chat') || ch.includes('messag');
       if (ch === 'voice') {
         agentStats[assigneeEmail].calls++;
-      } else if (
-        ch === 'chat' || ch === 'messaging' || ch === 'native_messaging' ||
-        ch === 'sunshine_conversations_api' ||
-        ch.includes('chat') || ch.includes('messag')
-      ) {
+      } else if (isChat && isBusinessHoursGDL(t.created_at)) {
+        // Only count as chat if initiated within business hours (8 AM - 5 PM GDL)
         agentStats[assigneeEmail].chats++;
       } else {
+        // After-hours chats count as emails (async work)
         agentStats[assigneeEmail].emails++;
       }
 
