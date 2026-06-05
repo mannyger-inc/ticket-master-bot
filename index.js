@@ -511,7 +511,7 @@ async function runEOD() {
 }
 
 // ── Cron schedule (Guadalajara timezone) ─────────────────────────────────
-cron.schedule('0 9 * * 1-5',  runSOD, { timezone: 'America/Mexico_City' });
+cron.schedule('0 8 * * 1-5',  runSOD, { timezone: 'America/Mexico_City' });
 cron.schedule('0 17 * * 1-5', runEOD, { timezone: 'America/Mexico_City' });
 
 // Pre-warm /today-stats cache every 5 min during business hours (8 AM - 6 PM)
