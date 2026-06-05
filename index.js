@@ -200,6 +200,24 @@ function isBusinessHoursGDL(isoTimestamp) {
   return hour >= 8 && hour < 17;
 }
 
+// Agents designated to handle live chats.
+// Only these agents get messaging tickets counted as chats.
+// Everyone else's messaging tickets count as emails.
+const CHAT_AGENTS = new Set([
+  'casandra.m@incfile.com',
+  'christa.n@bizee.com',
+  'odeth.r@incfile.com',
+  'ximena.c@incfile.com',
+  'cesar.c@incfile.com',
+  'alejandro.i@incfile.com',
+  'yunueth.r@incfile.com',
+  'mariana.g@incfile.com',
+  'dayanira.o@incfile.com',
+  'oliver.o@incfile.com',
+  'venancio.s@incfile.com',
+  'diana.o@incfile.com',
+]);
+
 // Fetch ALL tickets solved today (paginated, up to 2000)
 async function fetchSolvedToday() {
   const date    = getGuadalajaraDate();
@@ -271,13 +289,14 @@ function analyzeTickets(tickets, idToEmail) {
       const isChat = ch === 'chat' || ch === 'messaging' || ch === 'native_messaging' ||
         ch === 'sunshine_conversations_api' ||
         ch.includes('chat') || ch.includes('messag');
+      const isChatAgent = CHAT_AGENTS.has(assigneeEmail.toLowerCase());
       if (ch === 'voice') {
         agentStats[assigneeEmail].calls++;
-      } else if (isChat && isBusinessHoursGDL(t.created_at)) {
-        // Only count as chat if initiated within business hours (8 AM - 5 PM GDL)
+      } else if (isChat && isChatAgent && isBusinessHoursGDL(t.created_at)) {
+        // Count as chat only if: chat channel + designated chat agent + business hours
         agentStats[assigneeEmail].chats++;
       } else {
-        // After-hours chats count as emails (async work)
+        // Everything else counts as emails: non-chat agents, after-hours chats, email/web tickets
         agentStats[assigneeEmail].emails++;
       }
 
