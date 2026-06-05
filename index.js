@@ -514,6 +514,42 @@ async function runEOD() {
 cron.schedule('0 9 * * 1-5',  runSOD, { timezone: 'America/Mexico_City' });
 cron.schedule('0 17 * * 1-5', runEOD, { timezone: 'America/Mexico_City' });
 
+// Pre-warm /today-stats cache every 5 min during business hours (8 AM - 6 PM)
+// so KB widget responds instantly instead of waiting for on-demand fetch.
+async function warmTodayStatsCache() {
+  try {
+    const tickets   = await fetchSolvedToday();
+    const idToEmail = await resolveAssigneeEmails(tickets);
+    const { agentStats, typeCount } = analyzeTickets(tickets, idToEmail);
+    const agentRows = {};
+    Object.entries(agentStats).forEach(([email, s]) => {
+      const total = s.calls + s.chats + s.emails;
+      if (total > 0 || s.sales > 0) {
+        agentRows[email] = {
+          name:       s.name,
+          supervisor: s.supervisor,
+          calls:      s.calls,
+          chats:      s.chats,
+          emails:     s.emails,
+          sales:      s.sales,
+          total,
+        };
+      }
+    });
+    todayStatsCache = {
+      total:       tickets.length,
+      typeCounts:  typeCount,
+      agentStats:  agentRows,
+      lastUpdated: new Date().toISOString(),
+    };
+    todayStatsCacheTime = Date.now();
+    console.log(`[today-stats] Cache warmed — ${tickets.length} tickets`);
+  } catch (e) {
+    console.error('[today-stats] Warm failed:', e.message);
+  }
+}
+cron.schedule('*/5 8-18 * * 1-5', warmTodayStatsCache, { timezone: 'America/Mexico_City' });
+
 // ── Manual trigger endpoints ──────────────────────────────────────────────
 app.post('/sod', async (req, res) => {
   res.json({ ok: true, message: 'SOD triggered' });
