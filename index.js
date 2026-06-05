@@ -323,7 +323,7 @@ async function sendSlackDM(text) {
   const msgRes = await fetch('https://slack.com/api/chat.postMessage', {
     method:  'POST',
     headers: { Authorization: `Bearer ${SLACK_TOKEN}`, 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ channel: dm.channel.id, text, mrkdwn: true, username: 'Ticket Master Bot', icon_emoji: ':bar_chart:' }),
+    body:    JSON.stringify({ channel: dm.channel.id, text, mrkdwn: true }),
   });
   const msg = await msgRes.json();
   if (!msg.ok) throw new Error('chat.postMessage failed: ' + msg.error);
