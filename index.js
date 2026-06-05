@@ -691,5 +691,9 @@ app.get('/today-stats', async (req, res) => {
 app.get('/health', (_req, res) => res.json({ ok: true, bot: 'ticket-master-bot' }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`[ticket-master-bot] Listening on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`[ticket-master-bot] Listening on port ${PORT}`);
+  // Pre-warm today-stats cache immediately on startup so KB widget loads instantly
+  warmTodayStatsCache().catch(e => console.error('[startup warm]', e.message));
+});
 
