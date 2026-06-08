@@ -440,7 +440,7 @@ async function runEOD() {
     // 2. Solved tickets analysis
     const tickets    = await fetchSolvedToday();
     const idToEmail  = await resolveAssigneeEmails(tickets);
-    const { agentStats, typeCount } = analyzeTickets(tickets, idToEmail);
+    const { agentStats, typeCount, channelDist } = analyzeTickets(tickets, idToEmail);
 
     // 3. Write to Sheets
     const token  = await getGoogleAccessToken();
@@ -576,7 +576,7 @@ async function warmTodayStatsCache() {
   try {
     const tickets   = await fetchSolvedToday();
     const idToEmail = await resolveAssigneeEmails(tickets);
-    const { agentStats, typeCount } = analyzeTickets(tickets, idToEmail);
+    const { agentStats, typeCount, channelDist } = analyzeTickets(tickets, idToEmail);
     const agentRows = {};
     Object.entries(agentStats).forEach(([email, s]) => {
       const total = s.calls + s.chats + s.emails;
@@ -696,7 +696,7 @@ app.get('/today-stats', async (req, res) => {
     }
     const tickets   = await fetchSolvedToday();
     const idToEmail = await resolveAssigneeEmails(tickets);
-    const { agentStats, typeCount } = analyzeTickets(tickets, idToEmail);
+    const { agentStats, typeCount, channelDist } = analyzeTickets(tickets, idToEmail);
 
     // Build clean response: only agents with activity
     const agentRows = {};
