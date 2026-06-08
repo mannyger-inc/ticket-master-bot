@@ -580,9 +580,30 @@ cron.schedule('0 17 * * 1-5', runEOD, { timezone: 'America/Mexico_City' });
 // Returns {email: {calls, name}} for all agents with calls today.
 // This is the authoritative source for call counts — matches the Talk report
 // and never decreases since it counts calls accepted, not solved voice tickets.
+// Returns Unix timestamp for midnight today in Guadalajara (CDT = UTC-5, CST = UTC-6).
+// This matches the Talk report's "Jun 8, 00:00" start boundary.
+function getGDLMidnightUnix() {
+  const now = new Date();
+  // Get today's date string in GDL timezone
+  const gdlDateStr = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Mexico_City',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(now); // returns "YYYY-MM-DD"
+  // Parse as GDL midnight
+  const [y, m, d] = gdlDateStr.split('-').map(Number);
+  // Build midnight in GDL timezone via UTC offset
+  const gdlMidnight = new Date(`${gdlDateStr}T00:00:00`);
+  // Adjust: the above parses as LOCAL, so use a proper UTC offset approach
+  const offsetMs = new Date(now.toLocaleString('en-US', { timeZone: 'America/Mexico_City' })) - new Date(now.toLocaleString('en-US', { timeZone: 'UTC' }));
+  const utcMidnight = new Date(Date.UTC(y, m - 1, d) - offsetMs);
+  return Math.floor(utcMidnight.getTime() / 1000);
+}
+
 async function fetchTalkCallsByEmail() {
   try {
-    const res = await fetch(`${ZD_BASE}/api/v2/channels/voice/stats/agents.json`, {
+    // Pass start_time = GDL midnight so the API uses the same window as the Talk report
+    const startTime = getGDLMidnightUnix();
+    const res = await fetch(`${ZD_BASE}/api/v2/channels/voice/stats/agents.json?start_time=${startTime}`, {
       headers: { Authorization: ZD_AUTH, Accept: 'application/json' },
     });
     if (!res.ok) {
