@@ -256,92 +256,44 @@ async function resolveAssigneeEmails(tickets) {
   return map;
 }
 
-// Compute GDL midnight as a reliable Unix timestamp.
-// Uses Intl.DateTimeFormat to find the UTC offset then builds the timestamp explicitly.
-function getGDLMidnightUnix() {
-  const gdlDate = getGuadalajaraDate(); // 'YYYY-MM-DD' in GDL timezone
-  // Find UTC offset: check what hour noon-UTC is in GDL
-  const noonUTC = new Date(`${gdlDate}T12:00:00Z`);
-  const gdlHourAtNoon = parseInt(
-    new Intl.DateTimeFormat('en-US', { timeZone: 'America/Mexico_City', hour: 'numeric', hour12: false }).format(noonUTC),
-    10
-  );
-  const utcOffsetHours = 12 - (gdlHourAtNoon === 24 ? 0 : gdlHourAtNoon); // e.g. 5 for CDT
-  // GDL midnight = gdlDate at 00:00 GDL = gdlDate at utcOffsetHours:00 UTC
-  const midnightUTC = new Date(`${gdlDate}T${String(utcOffsetHours).padStart(2,'0')}:00:00Z`);
-  return Math.floor(midnightUTC.getTime() / 1000);
-}
-
-// Fetch email/web/api tickets worked today via Zendesk Incremental API (no result cap).
-// Falls back to a targeted search query if the incremental API fails.
+// Fetch email/web/api tickets agents worked today using targeted channel queries.
+// Uses Zendesk search with via:email/via:web filters — much more precise than
+// the incremental API which returns too much noise (auto-closed, unassigned, etc.)
 async function fetchEmailsWorkedToday() {
-  const EMAIL_CHANNELS = new Set(['email', 'web', 'api', 'instagram_dm', 'web_form', 'sample_ticket']);
-  const isEmailChannel = ch => {
-    if (!ch) return false;
-    const c = ch.toLowerCase();
-    return EMAIL_CHANNELS.has(c) || (
-      c !== 'voice'
-      && c !== 'native_messaging'
-      && c !== 'messaging'
-      && c !== 'chat'
-      && c !== 'sunshine_conversations_api'
-      && !c.includes('messag')
-      && !c.includes('chat')
-      && c !== ''
-    );
-  };
+  const date = getGuadalajaraDate();
+  const EMAIL_CHANNELS = new Set(['email', 'web', 'api', 'instagram_dm']);
+  const seen = new Set();
+  const tickets = [];
 
-  // ── Attempt 1: Incremental API ───────────────────────────────────────────
-  try {
-    const startTime = getGDLMidnightUnix();
-    console.log(`[incremental] start_time=${startTime} (${new Date(startTime*1000).toISOString()})`);
-    const tickets = [];
-    let url = `${ZD_BASE}/api/v2/incremental/tickets.json?start_time=${startTime}`;
+  // Run two targeted queries: email channel and web channel
+  const queries = [
+    `type:ticket via:email   updated>=${date} -status:new -status:deleted -status:closed`,
+    `type:ticket via:web     updated>=${date} -status:new -status:deleted -status:closed`,
+    `type:ticket via:api     updated>=${date} -status:new -status:deleted -status:closed`,
+  ];
+
+  for (const q of queries) {
+    let url = `${ZD_BASE}/api/v2/search.json?query=${encodeURIComponent(q)}&per_page=100&sort_by=updated_at&sort_order=desc`;
     let guard = 0;
-    while (url && guard < 30) {
+    while (url && guard < 20) {
       guard++;
       const res = await fetch(url, { headers: { Authorization: ZD_AUTH, Accept: 'application/json' } });
-      if (!res.ok) throw new Error(`incremental HTTP ${res.status}`);
+      if (!res.ok) { console.error('[email search] HTTP', res.status, 'query:', q); break; }
       const data = await res.json();
-      const batch = (data.tickets || []).filter(t =>
-        t.assignee_id                     // must have an assigned agent
-        && t.status !== 'new'             // agent must have touched it
-        && t.status !== 'deleted'
-        && t.status !== 'closed'          // exclude auto-closed old tickets
-        && isEmailChannel((t.via && t.via.channel) || '')
-      );
-      tickets.push(...batch);
-      if (data.end_of_stream) break;
+      for (const t of (data.results || [])) {
+        if (!t.assignee_id) continue;
+        if (seen.has(t.id)) continue;
+        seen.add(t.id);
+        tickets.push(t);
+      }
       url = data.next_page || null;
     }
-    console.log(`[incremental] ${tickets.length} email/web tickets found`);
-    if (tickets.length > 0) return tickets;
-    console.log('[incremental] 0 results — falling back to search API');
-  } catch (e) {
-    console.error('[incremental] failed:', e.message, '— falling back to search API');
   }
 
-  // ── Fallback: Search API (capped at 1000 but better than nothing) ────────
-  const gdlDate = getGuadalajaraDate();
-  const tickets = [];
-  let url = `${ZD_BASE}/api/v2/search.json?query=${encodeURIComponent(
-    `type:ticket updated>=${gdlDate} -status:new -status:deleted`
-  )}&per_page=100&sort_by=updated_at&sort_order=desc`;
-  let guard = 0;
-  while (url && guard < 20) {
-    guard++;
-    const res = await fetch(url, { headers: { Authorization: ZD_AUTH, Accept: 'application/json' } });
-    if (!res.ok) break;
-    const data = await res.json();
-    const batch = (data.results || []).filter(t =>
-      t.assignee_id && isEmailChannel((t.via && t.via.channel) || '')
-    );
-    tickets.push(...batch);
-    url = data.next_page || null;
-  }
-  console.log(`[search fallback] ${tickets.length} email/web tickets found`);
+  console.log(`[email search] ${tickets.length} email/web/api tickets worked today`);
   return tickets;
 }
+
 
 // Add email counts from worked-today tickets into existing agentStats.
 // Called after analyzeTickets so calls/chats are already populated.
