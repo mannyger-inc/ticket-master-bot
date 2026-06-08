@@ -283,7 +283,20 @@ function analyzeTickets(tickets, idToEmail) {
 
     // ── Per-agent channel breakdown ──
     const assigneeEmail = idToEmail[String(t.assignee_id)] || null;
-    if (assigneeEmail && agentStats[assigneeEmail]) {
+    if (assigneeEmail) {
+      // Create a dynamic entry for agents not in the AGENTS list (supervisors, QA, etc.)
+      if (!agentStats[assigneeEmail]) {
+        const knownAgent = AGENT_BY_EMAIL[assigneeEmail];
+        agentStats[assigneeEmail] = {
+          name:       knownAgent ? knownAgent.name : assigneeEmail.split('@')[0],
+          email:      assigneeEmail,
+          supervisor: knownAgent ? knownAgent.supervisor : '',
+          calls:      0,
+          chats:      0,
+          emails:     0,
+          sales:      0,
+        };
+      }
       const channel = (t.via && t.via.channel) || '';
       const ch = channel.toLowerCase();
       const isChat = ch === 'chat' || ch === 'messaging' || ch === 'native_messaging' ||
@@ -304,7 +317,7 @@ function analyzeTickets(tickets, idToEmail) {
       if (Array.isArray(t.tags) && t.tags.includes('cs_closed_sale')) {
         agentStats[assigneeEmail].sales++;
       }
-    }
+    }  // end if (assigneeEmail)
 
     // ── Ticket type breakdown ──
     const typeField = (t.custom_fields || []).find(f => f.id === TICKET_TYPE_FIELD_ID);
