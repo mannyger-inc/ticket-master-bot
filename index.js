@@ -304,7 +304,11 @@ async function fetchEmailsWorkedToday() {
       if (!res.ok) throw new Error(`incremental HTTP ${res.status}`);
       const data = await res.json();
       const batch = (data.tickets || []).filter(t =>
-        t.assignee_id && t.status !== 'new' && t.status !== 'deleted' && isEmailChannel((t.via && t.via.channel) || '')
+        t.assignee_id                     // must have an assigned agent
+        && t.status !== 'new'             // agent must have touched it
+        && t.status !== 'deleted'
+        && t.status !== 'closed'          // exclude auto-closed old tickets
+        && isEmailChannel((t.via && t.via.channel) || '')
       );
       tickets.push(...batch);
       if (data.end_of_stream) break;
@@ -864,49 +868,6 @@ app.get('/health', (_req, res) => res.json({ ok: true, bot: 'ticket-master-bot' 
 
 const PORT = process.env.PORT || 3000;
 
-// ── Temp debug: test email fetch directly ──────────────────────────────────
-app.get('/debug-emails', async (req, res) => {
-  try {
-    const startTime = getGDLMidnightUnix();
-    const gdlDate   = getGuadalajaraDate();
-    // Test incremental API first call only
-    const incUrl = `${ZD_BASE}/api/v2/incremental/tickets.json?start_time=${startTime}`;
-    const incRes = await fetch(incUrl, { headers: { Authorization: ZD_AUTH, Accept: 'application/json' } });
-    const incText = await incRes.text();
-    let incData = {};
-    try { incData = JSON.parse(incText); } catch(e) {}
-
-    // Test search API first page
-    const searchUrl = `${ZD_BASE}/api/v2/search.json?query=${encodeURIComponent(`type:ticket updated>=${gdlDate} -status:new`)}&per_page=10`;
-    const searchRes = await fetch(searchUrl, { headers: { Authorization: ZD_AUTH, Accept: 'application/json' } });
-    const searchData = await searchRes.json();
-
-    res.json({
-      startTime,
-      startTimeISO: new Date(startTime * 1000).toISOString(),
-      gdlDate,
-      incremental: {
-        status:       incRes.status,
-        ticketCount:  (incData.tickets || []).length,
-        endOfStream:  incData.end_of_stream,
-        nextPage:     incData.next_page || null,
-        sampleChannels: (incData.tickets || []).slice(0, 10).map(t => ({
-          id: t.id, via: t.via && t.via.channel, status: t.status, assignee: t.assignee_id
-        })),
-      },
-      search: {
-        status:      searchRes.status,
-        totalCount:  searchData.count,
-        resultCount: (searchData.results || []).length,
-        sampleChannels: (searchData.results || []).slice(0, 5).map(t => ({
-          id: t.id, via: t.via && t.via.channel, status: t.status
-        })),
-      },
-    });
-  } catch (e) {
-    res.json({ error: e.message, stack: e.stack });
-  }
-});
 
 app.listen(PORT, () => {
   console.log(`[ticket-master-bot] Listening on port ${PORT}`);
