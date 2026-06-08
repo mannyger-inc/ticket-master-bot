@@ -290,12 +290,7 @@ function analyzeTickets(tickets, idToEmail) {
         ch === 'sunshine_conversations_api' ||
         ch.includes('chat') || ch.includes('messag');
       const isChatAgent = CHAT_AGENTS.has(assigneeEmail.toLowerCase());
-      // Exclude voicemails: they inflate call counts and cause numbers to drop
-      // when voicemail tickets get re-opened for callbacks.
-      const isVoicemail = ch === 'voicemail'
-        || (Array.isArray(t.tags) && (t.tags.includes('voicemail') || t.tags.includes('voice_mail') || t.tags.includes('vm')))
-        || (t.via && t.via.source && t.via.source.rel === 'voicemail');
-      if (ch === 'voice' && !isVoicemail) {
+      if (ch === 'voice') {
         agentStats[assigneeEmail].calls++;
       } else if (isChat && isChatAgent && isBusinessHoursGDL(t.created_at)) {
         // Count as chat only if: chat channel + designated chat agent + business hours
