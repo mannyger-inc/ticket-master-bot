@@ -742,35 +742,41 @@ const PORT = process.env.PORT || 3000;
 // Probes WFM historical API paths to find call count data.
 // Remove after investigation.
 app.get('/wfm-probe', async (req, res) => {
-  const paths = [
-    '/wfm/l5/api/agents/activities',
-    '/wfm/l5/api/agents/activity',
-    '/wfm/l5/api/v2/agents/activities',
-    '/wfm/l5/api/v2/activities',
-    '/wfm/l5/api/timetracking',
-    '/wfm/l5/api/time_tracking',
-    '/wfm/l5/api/historical',
-    '/wfm/l5/api/reports',
-    '/wfm/l5/api/v2/reports',
-    '/wfm/l5/api/workstreams',
-    '/wfm/l5/api/activities',
-  ];
-  const results = [];
-  for (const path of paths) {
-    try {
+  try {
+    // Step 1: Get real WFM agent IDs
+    const agR = await fetch(`${ZD_BASE}/wfm/l5/api/v2/agents`, {
+      headers: { Authorization: ZD_AUTH, Accept: 'application/json' },
+    });
+    const agData = await agR.json();
+    const agList = Array.isArray(agData) ? agData : (agData.agents || agData.data || []);
+    const firstAgent = agList[0] || {};
+    const agentId = firstAgent.id || firstAgent.agentId || firstAgent.userId || 'unknown';
+    const today = new Date().toISOString().slice(0, 10);
+
+    const results = [
+      { note: 'First WFM agent sample', agentId, keys: Object.keys(firstAgent) }
+    ];
+    const paths = [
+      `/wfm/l5/api/agents/${agentId}/activities`,
+      `/wfm/l5/api/agents/${agentId}/activities?date=${today}`,
+      `/wfm/l5/api/agents/${agentId}/activities?start_date=${today}&end_date=${today}`,
+      `/wfm/l5/api/agents/${agentId}/activities?from=${today}&to=${today}`,
+      `/wfm/l5/api/agents/${agentId}`,
+      `/wfm/l5/api/agents/${agentId}/timetracking`,
+      `/wfm/l5/api/agents/${agentId}/timetracking?date=${today}`,
+    ];
+    for (const path of paths) {
       const r = await fetch(`${ZD_BASE}${path}`, {
         headers: { Authorization: ZD_AUTH, Accept: 'application/json' },
       });
       const text = await r.text();
-      let preview = text.slice(0, 300);
-      results.push({ path, status: r.status, preview });
-    } catch (e) {
-      results.push({ path, status: 'error', preview: e.message });
+      results.push({ path, status: r.status, preview: text.slice(0, 500) });
     }
+    res.json(results);
+  } catch (e) {
+    res.json({ error: e.message });
   }
-  res.json(results);
-});
-
+})
 app.listen(PORT, () => {
   console.log(`[ticket-master-bot] Listening on port ${PORT}`);
   // Pre-warm today-stats cache immediately on startup so KB widget loads instantly
