@@ -256,36 +256,50 @@ async function resolveAssigneeEmails(tickets) {
   return map;
 }
 
-// Fetch email/web/api tickets that agents worked on today (updated, any status).
-// Unlike calls/chats which auto-solve, email tickets stay open while being worked.
-// Using updated>= captures actual agent work regardless of final ticket status.
+// Fetch email/web/api tickets that agents worked on today using the Incremental API.
+// The search API caps at 1000 results which cuts off email tickets.
+// Incremental API has no cap — returns all tickets updated since a given timestamp.
 async function fetchEmailsWorkedToday() {
-  const date = getGuadalajaraDate();
+  // Compute GDL midnight as Unix timestamp
+  const gdlDateStr = getGuadalajaraDate(); // YYYY-MM-DD
+  const [y, m, d] = gdlDateStr.split('-').map(Number);
+  const sample = new Date();
+  const sampleGDL = new Date(sample.toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
+  const offsetMs  = sample.getTime() - sampleGDL.getTime();
+  const gdlMidnightMs = new Date(y, m - 1, d, 0, 0, 0, 0).getTime() + offsetMs;
+  const startTime = Math.floor(gdlMidnightMs / 1000);
+
+  const EMAIL_CHANNELS = new Set(['email', 'web', 'api', 'instagram_dm', 'web_form', 'sample_ticket']);
   const tickets = [];
-  let url = `${ZD_BASE}/api/v2/search.json?query=${encodeURIComponent(
-    `type:ticket updated>=${date} -status:new -status:deleted`
-  )}&per_page=100`;
+  let url = `${ZD_BASE}/api/v2/incremental/tickets.json?start_time=${startTime}`;
   let guard = 0;
-  while (url && guard < 20) {
+
+  while (url && guard < 30) {
     guard++;
     const res = await fetch(url, { headers: { Authorization: ZD_AUTH, Accept: 'application/json' } });
-    if (!res.ok) { console.error('[email query] HTTP', res.status); break; }
+    if (!res.ok) { console.error('[incremental] HTTP', res.status); break; }
     const data = await res.json();
-    const batch = (data.results || []).filter(t => {
+    const batch = (data.tickets || []).filter(t => {
+      if (!t.assignee_id) return false;
+      if (t.status === 'new' || t.status === 'deleted') return false;
       const ch = ((t.via && t.via.channel) || '').toLowerCase();
-      // Only include genuine email-type channels, exclude voice and all messaging/chat
-      return ch !== 'voice'
+      // Include known email channels; exclude voice and all messaging/chat
+      return EMAIL_CHANNELS.has(ch) || (
+        ch !== 'voice'
         && ch !== 'native_messaging'
         && ch !== 'messaging'
         && ch !== 'chat'
         && ch !== 'sunshine_conversations_api'
         && !ch.includes('messag')
-        && !ch.includes('chat');
+        && !ch.includes('chat')
+        && ch !== ''
+      );
     });
     tickets.push(...batch);
+    if (data.end_of_stream) break;
     url = data.next_page || null;
   }
-  console.log(`[email query] ${tickets.length} email/web tickets worked today`);
+  console.log(`[incremental] ${tickets.length} email/web tickets worked today (startTime=${startTime})`);
   return tickets;
 }
 
