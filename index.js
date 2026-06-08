@@ -256,6 +256,61 @@ async function resolveAssigneeEmails(tickets) {
   return map;
 }
 
+// Fetch email/web/api tickets that agents worked on today (updated, any status).
+// Unlike calls/chats which auto-solve, email tickets stay open while being worked.
+// Using updated>= captures actual agent work regardless of final ticket status.
+async function fetchEmailsWorkedToday() {
+  const date = getGuadalajaraDate();
+  const tickets = [];
+  let url = `${ZD_BASE}/api/v2/search.json?query=${encodeURIComponent(
+    `type:ticket updated>=${date} -status:new -status:deleted`
+  )}&per_page=100`;
+  let guard = 0;
+  while (url && guard < 20) {
+    guard++;
+    const res = await fetch(url, { headers: { Authorization: ZD_AUTH, Accept: 'application/json' } });
+    if (!res.ok) { console.error('[email query] HTTP', res.status); break; }
+    const data = await res.json();
+    const batch = (data.results || []).filter(t => {
+      const ch = ((t.via && t.via.channel) || '').toLowerCase();
+      // Only include genuine email-type channels, exclude voice and all messaging/chat
+      return ch !== 'voice'
+        && ch !== 'native_messaging'
+        && ch !== 'messaging'
+        && ch !== 'chat'
+        && ch !== 'sunshine_conversations_api'
+        && !ch.includes('messag')
+        && !ch.includes('chat');
+    });
+    tickets.push(...batch);
+    url = data.next_page || null;
+  }
+  console.log(`[email query] ${tickets.length} email/web tickets worked today`);
+  return tickets;
+}
+
+// Add email counts from worked-today tickets into existing agentStats.
+// Called after analyzeTickets so calls/chats are already populated.
+function countEmailsWorked(emailTickets, idToEmail, agentStats) {
+  for (const t of emailTickets) {
+    const assigneeEmail = idToEmail[String(t.assignee_id)] || null;
+    if (!assigneeEmail) continue;
+    if (!agentStats[assigneeEmail]) {
+      const knownAgent = AGENT_BY_EMAIL[assigneeEmail];
+      agentStats[assigneeEmail] = {
+        name:       knownAgent ? knownAgent.name : assigneeEmail.split('@')[0],
+        email:      assigneeEmail,
+        supervisor: knownAgent ? knownAgent.supervisor : '',
+        calls: 0, chats: 0, emails: 0, sales: 0,
+      };
+    }
+    agentStats[assigneeEmail].emails++;
+    if (Array.isArray(t.tags) && t.tags.includes('cs_closed_sale')) {
+      agentStats[assigneeEmail].sales++;
+    }
+  }
+}
+
 // Group solved tickets into per-agent stats and ticket-type breakdown
 function analyzeTickets(tickets, idToEmail) {
   // Initialize stats for all known agents
@@ -306,12 +361,14 @@ function analyzeTickets(tickets, idToEmail) {
       if (ch === 'voice') {
         agentStats[assigneeEmail].calls++;
       } else if (isChat && isChatAgent && isBusinessHoursGDL(t.created_at)) {
-        // Count as chat only if: chat channel + designated chat agent + business hours
+        // Count as chat: chat channel + designated chat agent + business hours
         agentStats[assigneeEmail].chats++;
-      } else {
-        // Everything else counts as emails: non-chat agents, after-hours chats, email/web tickets
+      } else if (isChat) {
+        // After-hours messaging or non-chat-agent messaging → counts as email
         agentStats[assigneeEmail].emails++;
       }
+      // email/web/api channels are NOT counted here — handled by countEmailsWorked
+      // using the "worked today" (updated>=date) ticket set for accuracy
 
       // Track closed sales (cs_closed_sale tag)
       if (Array.isArray(t.tags) && t.tags.includes('cs_closed_sale')) {
@@ -446,9 +503,13 @@ async function runEOD() {
     const day    = getDayName();
 
     // 2. Solved tickets analysis
-    const tickets    = await fetchSolvedToday();
-    const idToEmail  = await resolveAssigneeEmails(tickets);
+    const [tickets, emailTickets] = await Promise.all([
+      fetchSolvedToday(),
+      fetchEmailsWorkedToday(),
+    ]);
+    const idToEmail  = await resolveAssigneeEmails([...tickets, ...emailTickets]);
     const { agentStats, typeCount, channelDist } = analyzeTickets(tickets, idToEmail);
+    countEmailsWorked(emailTickets, idToEmail, agentStats);
 
     // 3. Write to Sheets
     const token  = await getGoogleAccessToken();
@@ -587,9 +648,15 @@ cron.schedule('0 17 * * 1-5', runEOD, { timezone: 'America/Mexico_City' });
 
 async function warmTodayStatsCache() {
   try {
-    const tickets   = await fetchSolvedToday();
-    const idToEmail = await resolveAssigneeEmails(tickets);
+    const [tickets, emailTickets] = await Promise.all([
+      fetchSolvedToday(),
+      fetchEmailsWorkedToday(),
+    ]);
+    const idToEmail = await resolveAssigneeEmails([...tickets, ...emailTickets]);
     const { agentStats, typeCount, channelDist } = analyzeTickets(tickets, idToEmail);
+
+    // Count emails from worked-today tickets (more accurate than solved-today for email channel)
+    countEmailsWorked(emailTickets, idToEmail, agentStats);
 
     const agentRows = {};
     Object.entries(agentStats).forEach(([email, s]) => {
