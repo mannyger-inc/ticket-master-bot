@@ -238,6 +238,28 @@ async function fetchSolvedToday() {
   return tickets;
 }
 
+// Fetch ALL tickets updated today (paginated, up to 3000).
+// This is used by /today-stats so the Daily Leaderboard reflects tickets worked today,
+// not only tickets solved today. EOD reporting still uses fetchSolvedToday().
+async function fetchUpdatedToday() {
+  const date    = getGuadalajaraDate();
+  const tickets = [];
+  let   url     = `${ZD_BASE}/api/v2/search.json?query=${encodeURIComponent(
+    `type:ticket updated>=${date}`
+  )}&per_page=100`;
+  let guard = 0;
+  while (url && guard < 30) {
+    guard++;
+    const res = await fetch(url, { headers: { Authorization: ZD_AUTH, Accept: 'application/json' } });
+    if (!res.ok) { console.error('[ZD updated search] HTTP', res.status); break; }
+    const data = await res.json();
+    tickets.push(...(data.results || []));
+    url = data.next_page || null;
+  }
+  console.log(`[ZD] Fetched ${tickets.length} updated tickets for ${date}`);
+  return tickets;
+}
+
 // Batch-resolve assignee IDs → emails
 async function resolveAssigneeEmails(tickets) {
   const ids = [...new Set(
@@ -254,146 +276,6 @@ async function resolveAssigneeEmails(tickets) {
     } catch (e) { console.error('[ZD users]', e.message); }
   }
   return map;
-}
-
-// Returns true if an ISO timestamp falls on today's date in Guadalajara timezone.
-function isTodayGDL(isoTimestamp) {
-  if (!isoTimestamp) return false;
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/Mexico_City',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-  }).formatToParts(new Date(isoTimestamp));
-  const p = {};
-  parts.forEach(x => { p[x.type] = x.value; });
-  return `${p.year}-${p.month}-${p.day}` === getGuadalajaraDate();
-}
-
-// Resolve the Zendesk user IDs for the known CS agent roster.
-// This lets the email leaderboard credit the agent who actually sent the public reply,
-// not only whoever currently owns or solved the ticket.
-async function resolveAgentIds() {
-  const map = {};
-
-  for (const agent of AGENTS) {
-    const email = agent.email.toLowerCase();
-    try {
-      const data = await zdFetch(`/api/v2/users/search.json?query=${encodeURIComponent(email)}`);
-      const user = (data.users || []).find(u => (u.email || '').toLowerCase() === email);
-      if (user && user.id) map[String(user.id)] = email;
-    } catch (e) {
-      console.error('[ZD agent lookup]', email, e.message);
-    }
-  }
-
-  return map;
-}
-
-// Fetch tickets touched today so we can inspect audits for actual public email replies.
-async function fetchTicketsUpdatedToday() {
-  const date = getGuadalajaraDate();
-  const tickets = [];
-  let url = `${ZD_BASE}/api/v2/search.json?query=${encodeURIComponent(
-    `type:ticket updated>=${date}`
-  )}&per_page=100`;
-  let guard = 0;
-
-  while (url && guard < 50) {
-    guard++;
-    const res = await fetch(url, { headers: { Authorization: ZD_AUTH, Accept: 'application/json' } });
-    if (!res.ok) {
-      console.error('[ZD updated search] HTTP', res.status);
-      break;
-    }
-    const data = await res.json();
-    tickets.push(...(data.results || []));
-    url = data.next_page || null;
-  }
-
-  console.log(`[ZD] Fetched ${tickets.length} updated tickets for email activity on ${date}`);
-  return tickets;
-}
-
-async function fetchTicketAudits(ticketId) {
-  const audits = [];
-  let url = `${ZD_BASE}/api/v2/tickets/${ticketId}/audits.json?per_page=100`;
-  let guard = 0;
-
-  while (url && guard < 10) {
-    guard++;
-    const res = await fetch(url, { headers: { Authorization: ZD_AUTH, Accept: 'application/json' } });
-    if (!res.ok) {
-      console.error('[ZD audits] ticket', ticketId, 'HTTP', res.status);
-      break;
-    }
-    const data = await res.json();
-    audits.push(...(data.audits || []));
-    url = data.next_page || null;
-  }
-
-  return audits;
-}
-
-function isChatLikeChannel(channel) {
-  const ch = String(channel || '').toLowerCase();
-  return ch === 'chat' ||
-    ch === 'messaging' ||
-    ch === 'native_messaging' ||
-    ch === 'sunshine_conversations_api' ||
-    ch.includes('chat') ||
-    ch.includes('messag');
-}
-
-// Count actual public non-chat/non-voice agent replies made today.
-// This is the fixed source for the leaderboard Emails column.
-async function fetchEmailReplyCountsToday() {
-  const tickets = await fetchTicketsUpdatedToday();
-  const agentIdToEmail = await resolveAgentIds();
-
-  const emailCounts = {};
-  AGENTS.forEach(a => { emailCounts[a.email.toLowerCase()] = 0; });
-
-  for (const ticket of tickets) {
-    const audits = await fetchTicketAudits(ticket.id);
-
-    for (const audit of audits) {
-      if (!isTodayGDL(audit.created_at)) continue;
-
-      const authorEmail = agentIdToEmail[String(audit.author_id)];
-      if (!authorEmail) continue;
-
-      const viaChannel = (audit.via && audit.via.channel) || '';
-      if (String(viaChannel).toLowerCase() === 'voice' || isChatLikeChannel(viaChannel)) continue;
-
-      const hasPublicComment = (audit.events || []).some(ev =>
-        ev &&
-        ev.type === 'Comment' &&
-        ev.public === true
-      );
-
-      if (hasPublicComment) emailCounts[authorEmail]++;
-    }
-  }
-
-  console.log('[email-counts]', emailCounts);
-  return emailCounts;
-}
-
-function applyEmailReplyCounts(agentStats, emailCounts) {
-  Object.entries(emailCounts || {}).forEach(([email, count]) => {
-    if (!agentStats[email]) {
-      const knownAgent = AGENT_BY_EMAIL[email];
-      agentStats[email] = {
-        name:       knownAgent ? knownAgent.name : email.split('@')[0],
-        email,
-        supervisor: knownAgent ? knownAgent.supervisor : '',
-        calls:      0,
-        chats:      0,
-        emails:     0,
-        sales:      0,
-      };
-    }
-    agentStats[email].emails = Number(count) || 0;
-  });
 }
 
 
@@ -585,12 +467,10 @@ async function runEOD() {
     const date   = getGuadalajaraDate();
     const day    = getDayName();
 
-    // 2. Solved tickets analysis plus actual public email reply counts
-    const tickets     = await fetchSolvedToday();
-    const idToEmail   = await resolveAssigneeEmails(tickets);
+    // 2. Solved tickets analysis
+    const tickets    = await fetchSolvedToday();
+    const idToEmail  = await resolveAssigneeEmails(tickets);
     const { agentStats, typeCount, channelDist } = analyzeTickets(tickets, idToEmail);
-    const emailCounts = await fetchEmailReplyCountsToday();
-    applyEmailReplyCounts(agentStats, emailCounts);
 
     // 3. Write to Sheets
     const token  = await getGoogleAccessToken();
@@ -729,11 +609,9 @@ cron.schedule('0 17 * * 1-5', runEOD, { timezone: 'America/Mexico_City' });
 
 async function warmTodayStatsCache() {
   try {
-    const tickets     = await fetchSolvedToday();
-    const idToEmail   = await resolveAssigneeEmails(tickets);
+    const tickets   = await fetchUpdatedToday();
+    const idToEmail = await resolveAssigneeEmails(tickets);
     const { agentStats, typeCount, channelDist } = analyzeTickets(tickets, idToEmail);
-    const emailCounts = await fetchEmailReplyCountsToday();
-    applyEmailReplyCounts(agentStats, emailCounts);
 
     const agentRows = {};
     Object.entries(agentStats).forEach(([email, s]) => {
@@ -755,7 +633,6 @@ async function warmTodayStatsCache() {
       typeCounts:  typeCount,
       agentStats:  agentRows,
       channelDist, // temporary debug field — shows raw via.channel distribution
-      emailCounts,
       lastUpdated: new Date().toISOString(),
     };
     todayStatsCacheTime = Date.now();
@@ -853,11 +730,9 @@ app.get('/today-stats', async (req, res) => {
     if (todayStatsCache && (now - todayStatsCacheTime) < TODAY_STATS_TTL) {
       return res.json(todayStatsCache);
     }
-    const tickets     = await fetchSolvedToday();
-    const idToEmail   = await resolveAssigneeEmails(tickets);
+    const tickets   = await fetchUpdatedToday();
+    const idToEmail = await resolveAssigneeEmails(tickets);
     const { agentStats, typeCount, channelDist } = analyzeTickets(tickets, idToEmail);
-    const emailCounts = await fetchEmailReplyCountsToday();
-    applyEmailReplyCounts(agentStats, emailCounts);
 
     // Build clean response: only agents with activity
     const agentRows = {};
@@ -880,8 +755,6 @@ app.get('/today-stats', async (req, res) => {
       total:      tickets.length,
       typeCounts: typeCount,
       agentStats: agentRows,
-      channelDist,
-      emailCounts,
       lastUpdated: new Date().toISOString(),
     };
     todayStatsCacheTime = now;
