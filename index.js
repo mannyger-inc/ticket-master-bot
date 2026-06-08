@@ -442,10 +442,6 @@ async function runEOD() {
     const idToEmail  = await resolveAssigneeEmails(tickets);
     const { agentStats, typeCount, channelDist } = analyzeTickets(tickets, idToEmail);
 
-    // Override ticket-based call counts with Talk stats API
-    const talkCalls = await fetchTalkCallsByEmail();
-    applyTalkCallCounts(agentStats, talkCalls);
-
     // 3. Write to Sheets
     const token  = await getGoogleAccessToken();
 
@@ -580,109 +576,12 @@ cron.schedule('0 17 * * 1-5', runEOD, { timezone: 'America/Mexico_City' });
 // Returns {email: {calls, name}} for all agents with calls today.
 // This is the authoritative source for call counts — matches the Talk report
 // and never decreases since it counts calls accepted, not solved voice tickets.
-// Returns Unix timestamp for midnight today in Guadalajara (CDT = UTC-5, CST = UTC-6).
-// This matches the Talk report's "Jun 8, 00:00" start boundary.
-function getGDLMidnightUnix() {
-  const now = new Date();
-  // Get today's date string in GDL timezone
-  const gdlDateStr = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'America/Mexico_City',
-    year: 'numeric', month: '2-digit', day: '2-digit',
-  }).format(now); // returns "YYYY-MM-DD"
-  // Parse as GDL midnight
-  const [y, m, d] = gdlDateStr.split('-').map(Number);
-  // Build midnight in GDL timezone via UTC offset
-  const gdlMidnight = new Date(`${gdlDateStr}T00:00:00`);
-  // Adjust: the above parses as LOCAL, so use a proper UTC offset approach
-  const offsetMs = new Date(now.toLocaleString('en-US', { timeZone: 'America/Mexico_City' })) - new Date(now.toLocaleString('en-US', { timeZone: 'UTC' }));
-  const utcMidnight = new Date(Date.UTC(y, m - 1, d) - offsetMs);
-  return Math.floor(utcMidnight.getTime() / 1000);
-}
-
-async function fetchTalkCallsByEmail() {
-  try {
-    // Pass start_time = GDL midnight so the API uses the same window as the Talk report
-    const startTime = getGDLMidnightUnix();
-    const res = await fetch(`${ZD_BASE}/api/v2/channels/voice/stats/agents.json?start_time=${startTime}`, {
-      headers: { Authorization: ZD_AUTH, Accept: 'application/json' },
-    });
-    if (!res.ok) {
-      console.warn('[Talk stats] HTTP', res.status, '— falling back to ticket-based calls');
-      return null;
-    }
-    const data = await res.json();
-    const agents = (data.agents || []).filter(a => (a.calls_accepted || 0) > 0);
-    if (!agents.length) return {};
-
-    // Batch-resolve agent IDs to emails and names
-    const ids = [...new Set(agents.map(a => String(a.agent_id)))].join(',');
-    const uRes = await fetch(`${ZD_BASE}/api/v2/users/show_many.json?ids=${ids}`, {
-      headers: { Authorization: ZD_AUTH, Accept: 'application/json' },
-    });
-    if (!uRes.ok) { console.warn('[Talk stats] user lookup HTTP', uRes.status); return null; }
-    const uData = await uRes.json();
-    const idToUser = {};
-    (uData.users || []).forEach(u => {
-      if (u && u.id) idToUser[String(u.id)] = { email: (u.email || '').toLowerCase(), name: u.name || '' };
-    });
-
-    const result = {};
-    agents.forEach(a => {
-      const u = idToUser[String(a.agent_id)];
-      if (u && u.email) {
-        result[u.email] = { calls: a.calls_accepted || 0, name: u.name };
-      }
-    });
-    console.log(`[Talk stats] Fetched call counts for ${Object.keys(result).length} agents`);
-    return result;
-  } catch (e) {
-    console.error('[Talk stats] fetchTalkCallsByEmail error:', e.message);
-    return null;
-  }
-}
-
-// Merges Talk stats call counts into agentStats.
-// Resets ticket-based voice counts and applies authoritative Talk counts.
-// Adds pure-call agents (calls but no email/chat tickets) using AGENTS lookup.
-function applyTalkCallCounts(agentStats, talkCalls) {
-  if (!talkCalls) return; // fallback: keep ticket-based counts
-
-  // Build email→agent lookup from AGENTS list for supervisor info
-  const agentByEmail = {};
-  AGENTS.forEach(a => { agentByEmail[a.email.toLowerCase()] = a; });
-
-  // Reset all ticket-based call counts
-  Object.values(agentStats).forEach(s => { s.calls = 0; });
-
-  // Apply Talk stats
-  for (const [email, info] of Object.entries(talkCalls)) {
-    if (agentStats[email]) {
-      // Agent already has chat/email ticket activity — just update calls
-      agentStats[email].calls = info.calls;
-    } else if (info.calls > 0) {
-      // Pure-call agent: look up supervisor from AGENTS list
-      const agentInfo = agentByEmail[email];
-      agentStats[email] = {
-        name:       agentInfo ? agentInfo.name : info.name,
-        supervisor: agentInfo ? agentInfo.supervisor : '',
-        calls:      info.calls,
-        chats:      0,
-        emails:     0,
-        sales:      0,
-      };
-    }
-  }
-}
 
 async function warmTodayStatsCache() {
   try {
     const tickets   = await fetchSolvedToday();
     const idToEmail = await resolveAssigneeEmails(tickets);
     const { agentStats, typeCount, channelDist } = analyzeTickets(tickets, idToEmail);
-
-    // Override ticket-based call counts with Talk stats API (authoritative, never decreases)
-    const talkCalls = await fetchTalkCallsByEmail();
-    applyTalkCallCounts(agentStats, talkCalls);
 
     const agentRows = {};
     Object.entries(agentStats).forEach(([email, s]) => {
