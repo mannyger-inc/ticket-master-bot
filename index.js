@@ -738,6 +738,39 @@ app.get('/today-stats', async (req, res) => {
 app.get('/health', (_req, res) => res.json({ ok: true, bot: 'ticket-master-bot' }));
 
 const PORT = process.env.PORT || 3000;
+// ── Temporary WFM probe endpoint ─────────────────────────────────────────
+// Probes WFM historical API paths to find call count data.
+// Remove after investigation.
+app.get('/wfm-probe', async (req, res) => {
+  const paths = [
+    '/wfm/l5/api/agents/activities',
+    '/wfm/l5/api/agents/activity',
+    '/wfm/l5/api/v2/agents/activities',
+    '/wfm/l5/api/v2/activities',
+    '/wfm/l5/api/timetracking',
+    '/wfm/l5/api/time_tracking',
+    '/wfm/l5/api/historical',
+    '/wfm/l5/api/reports',
+    '/wfm/l5/api/v2/reports',
+    '/wfm/l5/api/workstreams',
+    '/wfm/l5/api/activities',
+  ];
+  const results = [];
+  for (const path of paths) {
+    try {
+      const r = await fetch(`${ZD_BASE}${path}`, {
+        headers: { Authorization: ZD_AUTH, Accept: 'application/json' },
+      });
+      const text = await r.text();
+      let preview = text.slice(0, 300);
+      results.push({ path, status: r.status, preview });
+    } catch (e) {
+      results.push({ path, status: 'error', preview: e.message });
+    }
+  }
+  res.json(results);
+});
+
 app.listen(PORT, () => {
   console.log(`[ticket-master-bot] Listening on port ${PORT}`);
   // Pre-warm today-stats cache immediately on startup so KB widget loads instantly
