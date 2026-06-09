@@ -353,32 +353,6 @@ function analyzeTickets(tickets, idToEmail) {
   return { agentStats, typeCount, channelDist };
 }
 
-// Count email-type tickets from the "updated today" set that are NOT already
-// in the solved set (to avoid double-counting). Adds directly to agentStats.
-function countEmailsFromUpdated(updatedTickets, solvedIds, idToEmail, agentStats) {
-  const SKIP_CH = new Set(['voice', 'native_messaging', 'messaging', 'chat', 'sunshine_conversations_api']);
-  for (const t of updatedTickets) {
-    if (solvedIds.has(t.id)) continue; // already counted in analyzeTickets
-    if (!t.assignee_id) continue;
-    if (t.status === 'new' || t.status === 'deleted') continue;
-    const ch = ((t.via && t.via.channel) || '').toLowerCase();
-    if (SKIP_CH.has(ch) || ch.includes('messag') || ch.includes('chat')) continue;
-    const email = idToEmail[String(t.assignee_id)];
-    if (!email) continue;
-    if (!agentStats[email]) {
-      const k = AGENT_BY_EMAIL[email];
-      agentStats[email] = {
-        name: k ? k.name : email.split('@')[0],
-        email, supervisor: k ? k.supervisor : '',
-        calls: 0, chats: 0, emails: 0, sales: 0,
-      };
-    }
-    agentStats[email].emails++;
-    if (Array.isArray(t.tags) && t.tags.includes('cs_closed_sale')) {
-      agentStats[email].sales++;
-    }
-  }
-}
 
 // ── Hourly Sheet Architecture ─────────────────────────────────────────────
 // Per-agent hourly stats written to sheet. Leaderboard = sheet sum + live hour.
@@ -425,14 +399,11 @@ async function writeHourlySlot(slotLabel, gdlHourNum) {
       console.log('[hourly] Slot', slotLabel, 'already written for', date, '— skipping');
       return;
     }
-    const allSolved = await fetchSolvedToday();
+    const allSolved  = await fetchSolvedToday();
     const slotSolved = allSolved.filter(t => getGDLHour(t.solved_at || t.updated_at) === gdlHourNum);
-    const slotEmails = [...emailTicketStore.values()].filter(t => getGDLHour(t.updated_at) === gdlHourNum);
-    if (!slotSolved.length && !slotEmails.length) { console.log('[hourly] No activity for', slotLabel); return; }
-    const idToEmail = await resolveAssigneeEmails([...slotSolved, ...slotEmails]);
+    if (!slotSolved.length) { console.log('[hourly] No activity for', slotLabel); return; }
+    const idToEmail = await resolveAssigneeEmails(slotSolved);
     const { agentStats } = analyzeTickets(slotSolved, idToEmail);
-    const solvedIds = new Set(slotSolved.map(t => t.id));
-    countEmailsFromUpdated(slotEmails, solvedIds, idToEmail, agentStats);
     const rows = Object.values(agentStats)
       .filter(s => s.calls + s.chats + s.emails + s.sales > 0)
       .map(s => [date, slotLabel, s.name, s.email, s.supervisor, s.calls, s.chats, s.emails, s.calls + s.chats + s.emails, s.sales]);
@@ -577,7 +548,7 @@ async function runEOD() {
     for (const [email, s] of Object.entries(sheetTotals)) agentStats[email] = { ...s };
 
     // Get typeCount from today's solved tickets
-    const [solvedTickets] = await Promise.all([fetchSolvedToday(), pollEmailStore()]);
+    const solvedTickets = await fetchSolvedToday();
     const idToEmail  = await resolveAssigneeEmails(solvedTickets);
     const { typeCount, channelDist } = analyzeTickets(solvedTickets, idToEmail);
     const tickets = solvedTickets; // for total count in Slack message
@@ -710,86 +681,6 @@ async function runEOD() {
 cron.schedule('0 8 * * 1-5',  runSOD, { timezone: 'America/Mexico_City' });
 cron.schedule('0 17 * * 1-5', runEOD, { timezone: 'America/Mexico_City' });
 
-// Pre-warm /today-stats cache every 5 min during business hours (8 AM - 6 PM)
-// so KB widget responds instantly instead of waiting for on-demand fetch.
-// Fetch per-agent call counts from Zendesk Talk stats API.
-// Returns {email: {calls, name}} for all agents with calls today.
-// This is the authoritative source for call counts — matches the Talk report
-// and never decreases since it counts calls accepted, not solved voice tickets.
-
-// ── Email Ticket Store ───────────────────────────────────────────────────
-// Accumulates email-type tickets throughout the day using the Zendesk
-// Incremental API. Each poll fetches only tickets updated since the last
-// cursor so we never approach the 1000-result cap.
-let emailTicketStore  = new Map();
-let emailStoreDate    = null;
-let emailStoreCursor  = null;
-
-function getGDLMidnightUnix() {
-  const gdlDate = getGuadalajaraDate();
-  const noonUTC = new Date(gdlDate + 'T12:00:00Z');
-  const gdlHour = parseInt(
-    new Intl.DateTimeFormat('en-US', {
-      timeZone: 'America/Mexico_City', hour: 'numeric', hour12: false,
-    }).format(noonUTC), 10
-  );
-  const offsetH = 12 - (gdlHour === 24 ? 0 : gdlHour);
-  return Math.floor(
-    new Date(gdlDate + 'T' + String(offsetH).padStart(2, '0') + ':00:00Z').getTime() / 1000
-  );
-}
-
-const EMAIL_SKIP_CH = new Set([
-  'voice', 'native_messaging', 'messaging', 'chat', 'sunshine_conversations_api',
-]);
-function isEmailChannel(ch) {
-  if (!ch) return false;
-  const c = ch.toLowerCase();
-  return !EMAIL_SKIP_CH.has(c) && !c.includes('messag') && !c.includes('chat') && c !== '';
-}
-
-async function pollEmailStore() {
-  const today = getGuadalajaraDate();
-  if (emailStoreDate !== today) {
-    emailTicketStore = new Map();
-    emailStoreDate   = today;
-    emailStoreCursor = getGDLMidnightUnix();
-    console.log('[email store] New day ' + today + ', cursor=' + emailStoreCursor);
-  }
-  let url   = ZD_BASE + '/api/v2/incremental/tickets.json?start_time=' + emailStoreCursor;
-  let added = 0;
-  let guard = 0;
-  let latestCursor = emailStoreCursor;
-  while (url && guard < 50) {
-    guard++;
-    const res = await fetch(url, { headers: { Authorization: ZD_AUTH, Accept: 'application/json' } });
-    if (!res.ok) { console.error('[email store] HTTP', res.status); break; }
-    const data = await res.json();
-    if (typeof data.end_time === 'number') latestCursor = data.end_time;
-    else if (data.next_page) {
-      const match = data.next_page.match(/start_time=(\d+)/);
-      if (match) latestCursor = parseInt(match[1], 10);
-    }
-    for (const t of (data.tickets || [])) {
-      if (!t.assignee_id) continue;
-      if (t.status === 'new' || t.status === 'deleted') continue;
-      if (!isEmailChannel((t.via && t.via.channel) || '')) continue;
-      // Only count tickets the agent actually worked — meaning they replied or
-      // resolved it (status = pending, solved, or on_hold). Tickets that are
-      // still 'open' were likely just assigned without agent action (e.g. an
-      // absent agent auto-assigned by Round Robin, Assisted Escalation, etc.)
-      const workedStatus = t.status === 'pending' || t.status === 'solved' || t.status === 'on-hold';
-      if (!workedStatus) continue;
-      const prev = emailTicketStore.get(t.id);
-      if (!prev) { added++; emailTicketStore.set(t.id, t); }
-      else if (t.updated_at > prev.updated_at) emailTicketStore.set(t.id, t);
-    }
-    if (data.end_of_stream) break;
-    url = data.next_page || null;
-  }
-  emailStoreCursor = latestCursor;
-  console.log('[email store] +' + added + ' | total=' + emailTicketStore.size + ' | cursor=' + emailStoreCursor);
-}
 
 async function warmTodayStatsCache() {
   try {
@@ -799,14 +690,11 @@ async function warmTodayStatsCache() {
     // 1. Completed hours from sheet (persistent across restarts)
     const sheetTotals = await readSheetTotalsToday(token);
 
-    // 2. Current hour live data
-    const [solvedTickets] = await Promise.all([fetchSolvedToday(), pollEmailStore()]);
-    const liveHourSolved  = solvedTickets.filter(t => getGDLHour(t.solved_at || t.updated_at) === gdlHour);
-    const liveHourEmails  = [...emailTicketStore.values()].filter(t => getGDLHour(t.updated_at) === gdlHour);
-    const idToEmail       = await resolveAssigneeEmails([...liveHourSolved, ...liveHourEmails]);
+    // 2. Current hour live data — solved tickets only (calls, chats, emails)
+    const solvedTickets  = await fetchSolvedToday();
+    const liveHourSolved = solvedTickets.filter(t => getGDLHour(t.solved_at || t.updated_at) === gdlHour);
+    const idToEmail      = await resolveAssigneeEmails(liveHourSolved);
     const { agentStats: liveStats, typeCount, channelDist } = analyzeTickets(liveHourSolved, idToEmail);
-    const liveSolvedIds   = new Set(liveHourSolved.map(t => t.id));
-    countEmailsFromUpdated(liveHourEmails, liveSolvedIds, idToEmail, liveStats);
 
     // 3. Merge sheet + live
     const merged = {};
