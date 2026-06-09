@@ -542,7 +542,10 @@ async function runEOD() {
     const date   = getGuadalajaraDate();
     const day    = getDayName();
 
-    // 2. Write final hour slot, then read full day from sheet
+    // 2. Get Google token first (needed for sheet reads/writes)
+    const token  = await getGoogleAccessToken();
+
+    // Write final hour slot, then read full day from sheet
     await writeHourlySlot('4-5', 16);
     const sheetTotals = await readSheetTotalsToday(token);
     const agentStats = {};
@@ -555,7 +558,6 @@ async function runEOD() {
     const tickets = solvedTickets; // for total count in Slack message
 
     // 3. Write to Sheets
-    const token  = await getGoogleAccessToken();
 
     // 3a. Update Daily Queue Log: fill in EOD columns (F–H) on today's row
     const rowNum = await findTodayRow(token);
