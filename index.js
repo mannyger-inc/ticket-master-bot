@@ -353,6 +353,33 @@ function analyzeTickets(tickets, idToEmail) {
   return { agentStats, typeCount, channelDist };
 }
 
+// Count email-type tickets from the "updated today" set that are NOT already
+// in the solved set (to avoid double-counting). Adds directly to agentStats.
+function countEmailsFromUpdated(updatedTickets, solvedIds, idToEmail, agentStats) {
+  const SKIP_CH = new Set(['voice', 'native_messaging', 'messaging', 'chat', 'sunshine_conversations_api']);
+  for (const t of updatedTickets) {
+    if (solvedIds.has(t.id)) continue; // already counted in analyzeTickets
+    if (!t.assignee_id) continue;
+    if (t.status === 'new' || t.status === 'deleted') continue;
+    const ch = ((t.via && t.via.channel) || '').toLowerCase();
+    if (SKIP_CH.has(ch) || ch.includes('messag') || ch.includes('chat')) continue;
+    const email = idToEmail[String(t.assignee_id)];
+    if (!email) continue;
+    if (!agentStats[email]) {
+      const k = AGENT_BY_EMAIL[email];
+      agentStats[email] = {
+        name: k ? k.name : email.split('@')[0],
+        email, supervisor: k ? k.supervisor : '',
+        calls: 0, chats: 0, emails: 0, sales: 0,
+      };
+    }
+    agentStats[email].emails++;
+    if (Array.isArray(t.tags) && t.tags.includes('cs_closed_sale')) {
+      agentStats[email].sales++;
+    }
+  }
+}
+
 // ── Google Sheets helpers ─────────────────────────────────────────────────
 const SHEETS_BASE = 'https://sheets.googleapis.com/v4/spreadsheets';
 
@@ -468,9 +495,15 @@ async function runEOD() {
     const day    = getDayName();
 
     // 2. Solved tickets analysis
-    const tickets    = await fetchSolvedToday();
-    const idToEmail  = await resolveAssigneeEmails(tickets);
-    const { agentStats, typeCount, channelDist } = analyzeTickets(tickets, idToEmail);
+    const [solvedTickets, updatedTickets] = await Promise.all([
+      fetchSolvedToday(),
+      fetchUpdatedToday(),
+    ]);
+    const idToEmail  = await resolveAssigneeEmails([...solvedTickets, ...updatedTickets]);
+    const { agentStats, typeCount, channelDist } = analyzeTickets(solvedTickets, idToEmail);
+    const solvedIds  = new Set(solvedTickets.map(t => t.id));
+    countEmailsFromUpdated(updatedTickets, solvedIds, idToEmail, agentStats);
+    const tickets = solvedTickets; // keep for total count in Slack message
 
     // 3. Write to Sheets
     const token  = await getGoogleAccessToken();
@@ -609,9 +642,16 @@ cron.schedule('0 17 * * 1-5', runEOD, { timezone: 'America/Mexico_City' });
 
 async function warmTodayStatsCache() {
   try {
-    const tickets   = await fetchUpdatedToday();
-    const idToEmail = await resolveAssigneeEmails(tickets);
-    const { agentStats, typeCount, channelDist } = analyzeTickets(tickets, idToEmail);
+    const [solvedTickets, updatedTickets] = await Promise.all([
+      fetchSolvedToday(),    // calls + chats (auto-solve at end of interaction)
+      fetchUpdatedToday(),   // email/web tickets worked today (open or pending)
+    ]);
+    const idToEmail = await resolveAssigneeEmails([...solvedTickets, ...updatedTickets]);
+    const { agentStats, typeCount, channelDist } = analyzeTickets(solvedTickets, idToEmail);
+
+    // Add emails from updated tickets (not already in solved set)
+    const solvedIds = new Set(solvedTickets.map(t => t.id));
+    countEmailsFromUpdated(updatedTickets, solvedIds, idToEmail, agentStats);
 
     const agentRows = {};
     Object.entries(agentStats).forEach(([email, s]) => {
@@ -629,7 +669,7 @@ async function warmTodayStatsCache() {
       }
     });
     todayStatsCache = {
-      total:       tickets.length,
+      total:       solvedTickets.length,
       typeCounts:  typeCount,
       agentStats:  agentRows,
       channelDist, // temporary debug field — shows raw via.channel distribution
