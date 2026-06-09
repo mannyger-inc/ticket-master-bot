@@ -495,15 +495,16 @@ async function runEOD() {
     const day    = getDayName();
 
     // 2. Solved tickets analysis
-    const [solvedTickets, updatedTickets] = await Promise.all([
+    const [solvedTickets] = await Promise.all([
       fetchSolvedToday(),
-      fetchUpdatedToday(),
+      pollEmailStore(),
     ]);
-    const idToEmail  = await resolveAssigneeEmails([...solvedTickets, ...updatedTickets]);
+    const emailTickets = [...emailTicketStore.values()];
+    const idToEmail  = await resolveAssigneeEmails([...solvedTickets, ...emailTickets]);
     const { agentStats, typeCount, channelDist } = analyzeTickets(solvedTickets, idToEmail);
     const solvedIds  = new Set(solvedTickets.map(t => t.id));
-    countEmailsFromUpdated(updatedTickets, solvedIds, idToEmail, agentStats);
-    const tickets = solvedTickets; // keep for total count in Slack message
+    countEmailsFromUpdated(emailTickets, solvedIds, idToEmail, agentStats);
+    const tickets = solvedTickets; // for total count in Slack message
 
     // 3. Write to Sheets
     const token  = await getGoogleAccessToken();
@@ -640,18 +641,85 @@ cron.schedule('0 17 * * 1-5', runEOD, { timezone: 'America/Mexico_City' });
 // This is the authoritative source for call counts — matches the Talk report
 // and never decreases since it counts calls accepted, not solved voice tickets.
 
+// ── Email Ticket Store ───────────────────────────────────────────────────
+// Accumulates email-type tickets throughout the day using the Zendesk
+// Incremental API. Each poll fetches only tickets updated since the last
+// cursor so we never approach the 1000-result cap.
+let emailTicketStore  = new Map();
+let emailStoreDate    = null;
+let emailStoreCursor  = null;
+
+function getGDLMidnightUnix() {
+  const gdlDate = getGuadalajaraDate();
+  const noonUTC = new Date(gdlDate + 'T12:00:00Z');
+  const gdlHour = parseInt(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Mexico_City', hour: 'numeric', hour12: false,
+    }).format(noonUTC), 10
+  );
+  const offsetH = 12 - (gdlHour === 24 ? 0 : gdlHour);
+  return Math.floor(
+    new Date(gdlDate + 'T' + String(offsetH).padStart(2, '0') + ':00:00Z').getTime() / 1000
+  );
+}
+
+const EMAIL_SKIP_CH = new Set([
+  'voice', 'native_messaging', 'messaging', 'chat', 'sunshine_conversations_api',
+]);
+function isEmailChannel(ch) {
+  if (!ch) return false;
+  const c = ch.toLowerCase();
+  return !EMAIL_SKIP_CH.has(c) && !c.includes('messag') && !c.includes('chat') && c !== '';
+}
+
+async function pollEmailStore() {
+  const today = getGuadalajaraDate();
+  if (emailStoreDate !== today) {
+    emailTicketStore = new Map();
+    emailStoreDate   = today;
+    emailStoreCursor = getGDLMidnightUnix();
+    console.log('[email store] New day ' + today + ', cursor=' + emailStoreCursor);
+  }
+  let url   = ZD_BASE + '/api/v2/incremental/tickets.json?start_time=' + emailStoreCursor;
+  let added = 0;
+  let guard = 0;
+  let latestCursor = emailStoreCursor;
+  while (url && guard < 50) {
+    guard++;
+    const res = await fetch(url, { headers: { Authorization: ZD_AUTH, Accept: 'application/json' } });
+    if (!res.ok) { console.error('[email store] HTTP', res.status); break; }
+    const data = await res.json();
+    if (typeof data.end_time === 'number') latestCursor = data.end_time;
+    else if (data.next_page) {
+      const match = data.next_page.match(/start_time=(\d+)/);
+      if (match) latestCursor = parseInt(match[1], 10);
+    }
+    for (const t of (data.tickets || [])) {
+      if (!t.assignee_id) continue;
+      if (t.status === 'new' || t.status === 'deleted') continue;
+      if (!isEmailChannel((t.via && t.via.channel) || '')) continue;
+      const prev = emailTicketStore.get(t.id);
+      if (!prev) { added++; emailTicketStore.set(t.id, t); }
+      else if (t.updated_at > prev.updated_at) emailTicketStore.set(t.id, t);
+    }
+    if (data.end_of_stream) break;
+    url = data.next_page || null;
+  }
+  emailStoreCursor = latestCursor;
+  console.log('[email store] +' + added + ' | total=' + emailTicketStore.size + ' | cursor=' + emailStoreCursor);
+}
+
 async function warmTodayStatsCache() {
   try {
-    const [solvedTickets, updatedTickets] = await Promise.all([
-      fetchSolvedToday(),    // calls + chats (auto-solve at end of interaction)
-      fetchUpdatedToday(),   // email/web tickets worked today (open or pending)
+    const [solvedTickets] = await Promise.all([
+      fetchSolvedToday(),
+      pollEmailStore(),
     ]);
-    const idToEmail = await resolveAssigneeEmails([...solvedTickets, ...updatedTickets]);
+    const emailTickets = [...emailTicketStore.values()];
+    const idToEmail = await resolveAssigneeEmails([...solvedTickets, ...emailTickets]);
     const { agentStats, typeCount, channelDist } = analyzeTickets(solvedTickets, idToEmail);
-
-    // Add emails from updated tickets (not already in solved set)
     const solvedIds = new Set(solvedTickets.map(t => t.id));
-    countEmailsFromUpdated(updatedTickets, solvedIds, idToEmail, agentStats);
+    countEmailsFromUpdated(emailTickets, solvedIds, idToEmail, agentStats);
 
     const agentRows = {};
     Object.entries(agentStats).forEach(([email, s]) => {
