@@ -380,6 +380,72 @@ function countEmailsFromUpdated(updatedTickets, solvedIds, idToEmail, agentStats
   }
 }
 
+// ── Hourly Sheet Architecture ─────────────────────────────────────────────
+// Per-agent hourly stats written to sheet. Leaderboard = sheet sum + live hour.
+
+function getGDLHour(isoTimestamp) {
+  if (!isoTimestamp) return -1;
+  const h = parseInt(new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Mexico_City', hour: 'numeric', hour12: false,
+  }).format(new Date(isoTimestamp)), 10);
+  return h === 24 ? 0 : h;
+}
+function currentGDLHour() { return getGDLHour(new Date().toISOString()); }
+
+async function readSheetTotalsToday(token) {
+  const today = getGuadalajaraDate();
+  try {
+    const data = await sheetsGet(token, 'Hourly Stats!A:J');
+    const totals = {};
+    for (const row of (data.values || []).slice(1)) {
+      if ((row[0] || '') !== today) continue;
+      const email = row[3] || '';
+      if (!email) continue;
+      if (!totals[email]) totals[email] = { name: row[2] || email.split('@')[0], supervisor: row[4] || '', calls: 0, chats: 0, emails: 0, sales: 0 };
+      totals[email].calls  += Number(row[5]) || 0;
+      totals[email].chats  += Number(row[6]) || 0;
+      totals[email].emails += Number(row[7]) || 0;
+      totals[email].sales  += Number(row[9]) || 0;
+    }
+    return totals;
+  } catch (e) { console.error('[hourly] readSheetTotalsToday:', e.message); return {}; }
+}
+
+async function writeHourlySlot(slotLabel, gdlHourNum) {
+  const date = getGuadalajaraDate();
+  console.log('[hourly] Writing slot', slotLabel);
+  try {
+    const allSolved = await fetchSolvedToday();
+    const slotSolved = allSolved.filter(t => getGDLHour(t.solved_at || t.updated_at) === gdlHourNum);
+    const slotEmails = [...emailTicketStore.values()].filter(t => getGDLHour(t.updated_at) === gdlHourNum);
+    if (!slotSolved.length && !slotEmails.length) { console.log('[hourly] No activity for', slotLabel); return; }
+    const idToEmail = await resolveAssigneeEmails([...slotSolved, ...slotEmails]);
+    const { agentStats } = analyzeTickets(slotSolved, idToEmail);
+    const solvedIds = new Set(slotSolved.map(t => t.id));
+    countEmailsFromUpdated(slotEmails, solvedIds, idToEmail, agentStats);
+    const rows = Object.values(agentStats)
+      .filter(s => s.calls + s.chats + s.emails + s.sales > 0)
+      .map(s => [date, slotLabel, s.name, s.email, s.supervisor, s.calls, s.chats, s.emails, s.calls + s.chats + s.emails, s.sales]);
+    if (rows.length) {
+      const token = await getGoogleAccessToken();
+      await sheetsAppend(token, 'Hourly Stats!A:J', rows);
+      console.log('[hourly] Wrote', rows.length, 'rows for', slotLabel);
+    }
+  } catch (e) { console.error('[hourly] writeHourlySlot:', e.message); }
+}
+
+const HOURLY_SLOTS = [
+  ['0 9  * * 1-5', '8-9',   8],
+  ['0 10 * * 1-5', '9-10',  9],
+  ['0 11 * * 1-5', '10-11', 10],
+  ['0 12 * * 1-5', '11-12', 11],
+  ['0 13 * * 1-5', '12-1',  12],
+  ['0 14 * * 1-5', '1-2',   13],
+  ['0 15 * * 1-5', '2-3',   14],
+  ['0 16 * * 1-5', '3-4',   15],
+  ['0 17 * * 1-5', '4-5',   16],
+];
+
 // ── Google Sheets helpers ─────────────────────────────────────────────────
 const SHEETS_BASE = 'https://sheets.googleapis.com/v4/spreadsheets';
 
@@ -711,45 +777,52 @@ async function pollEmailStore() {
 
 async function warmTodayStatsCache() {
   try {
-    const [solvedTickets] = await Promise.all([
-      fetchSolvedToday(),
-      pollEmailStore(),
-    ]);
-    const emailTickets = [...emailTicketStore.values()];
-    const idToEmail = await resolveAssigneeEmails([...solvedTickets, ...emailTickets]);
-    const { agentStats, typeCount, channelDist } = analyzeTickets(solvedTickets, idToEmail);
-    const solvedIds = new Set(solvedTickets.map(t => t.id));
-    countEmailsFromUpdated(emailTickets, solvedIds, idToEmail, agentStats);
+    const gdlHour = currentGDLHour();
+    const token   = await getGoogleAccessToken();
+
+    // 1. Completed hours from sheet (persistent across restarts)
+    const sheetTotals = await readSheetTotalsToday(token);
+
+    // 2. Current hour live data
+    const [solvedTickets] = await Promise.all([fetchSolvedToday(), pollEmailStore()]);
+    const liveHourSolved  = solvedTickets.filter(t => getGDLHour(t.solved_at || t.updated_at) === gdlHour);
+    const liveHourEmails  = [...emailTicketStore.values()].filter(t => getGDLHour(t.updated_at) === gdlHour);
+    const idToEmail       = await resolveAssigneeEmails([...liveHourSolved, ...liveHourEmails]);
+    const { agentStats: liveStats, typeCount, channelDist } = analyzeTickets(liveHourSolved, idToEmail);
+    const liveSolvedIds   = new Set(liveHourSolved.map(t => t.id));
+    countEmailsFromUpdated(liveHourEmails, liveSolvedIds, idToEmail, liveStats);
+
+    // 3. Merge sheet + live
+    const merged = {};
+    for (const [email, s] of Object.entries(sheetTotals)) { merged[email] = { ...s }; }
+    for (const [email, s] of Object.entries(liveStats)) {
+      if (!merged[email]) merged[email] = { name: s.name, supervisor: s.supervisor, calls: 0, chats: 0, emails: 0, sales: 0 };
+      merged[email].calls  += s.calls;
+      merged[email].chats  += s.chats;
+      merged[email].emails += s.emails;
+      merged[email].sales  += s.sales;
+    }
 
     const agentRows = {};
-    Object.entries(agentStats).forEach(([email, s]) => {
+    for (const [email, s] of Object.entries(merged)) {
       const total = s.calls + s.chats + s.emails;
-      if (total > 0 || s.sales > 0) {
-        agentRows[email] = {
-          name:       s.name,
-          supervisor: s.supervisor,
-          calls:      s.calls,
-          chats:      s.chats,
-          emails:     s.emails,
-          sales:      s.sales,
-          total,
-        };
-      }
-    });
+      if (total > 0 || s.sales > 0) agentRows[email] = { ...s, total };
+    }
     todayStatsCache = {
-      total:       solvedTickets.length,
-      typeCounts:  typeCount,
-      agentStats:  agentRows,
-      channelDist, // temporary debug field — shows raw via.channel distribution
+      total:      Object.values(agentRows).reduce((sum, r) => sum + r.total, 0),
+      typeCounts: typeCount,
+      agentStats: agentRows,
+      channelDist,
       lastUpdated: new Date().toISOString(),
     };
     todayStatsCacheTime = Date.now();
-    console.log(`[today-stats] Cache warmed — ${tickets.length} tickets`);
-  } catch (e) {
-    console.error('[today-stats] Warm failed:', e.message);
-  }
+    console.log('[today-stats] Cache warmed — sheet:', Object.keys(sheetTotals).length, 'agents | live hour:', Object.keys(liveStats).length, 'agents');
+  } catch (e) { console.error('[today-stats] Warm failed:', e.message); }
 }
 cron.schedule('*/5 8-18 * * 1-5', warmTodayStatsCache, { timezone: 'America/Mexico_City' });
+HOURLY_SLOTS.forEach(([schedule, label, hour]) => {
+  cron.schedule(schedule, () => writeHourlySlot(label, hour), { timezone: 'America/Mexico_City' });
+});
 
 // ── Manual trigger endpoints ──────────────────────────────────────────────
 app.post('/sod', async (req, res) => {
@@ -873,6 +946,21 @@ app.get('/today-stats', async (req, res) => {
   }
 });
 
+app.post('/setup-hourly', async (req, res) => {
+  try {
+    const token = await getGoogleAccessToken();
+    const batchRes = await fetch(
+      'https://sheets.googleapis.com/v4/spreadsheets/' + SHEET_ID + ':batchUpdate',
+      { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requests: [{ addSheet: { properties: { title: 'Hourly Stats' } } }] }) }
+    );
+    const bd = await batchRes.json();
+    if (bd.error && !bd.error.message.includes('already exists')) return res.json({ ok: false, error: bd.error.message });
+    await sheetsUpdate(token, 'Hourly Stats!A1:J1', [['Date','Slot','Agent','Email','Team','Calls','Chats','Emails','Total','Sales']]);
+    res.json({ ok: true, message: 'Hourly Stats tab ready' });
+  } catch (e) { res.json({ ok: false, error: e.message }); }
+});
+
 app.get('/health', (_req, res) => res.json({ ok: true, bot: 'ticket-master-bot' }));
 
 const PORT = process.env.PORT || 3000;
@@ -882,4 +970,14 @@ app.listen(PORT, () => {
   console.log(`[ticket-master-bot] Listening on port ${PORT}`);
   // Pre-warm today-stats cache immediately on startup so KB widget loads instantly
   warmTodayStatsCache().catch(e => console.error('[startup warm]', e.message));
-});
+});    // Write final 4-5 PM slot then read full day from sheet
+    await writeHourlySlot('4-5', 16);
+    const sheetTotals = await readSheetTotalsToday(token);
+    const agentStats = {};
+    for (const [email, s] of Object.entries(sheetTotals)) agentStats[email] = { ...s };
+
+    // Also get typeCount from solved tickets
+    const [solvedTickets] = await Promise.all([fetchSolvedToday(), pollEmailStore()]);
+    const idToEmail = await resolveAssigneeEmails(solvedTickets);
+    const { typeCount, channelDist } = analyzeTickets(solvedTickets, idToEmail);
+    const tickets = solvedTickets;
