@@ -774,6 +774,14 @@ async function pollEmailStore() {
       if (!t.assignee_id) continue;
       if (t.status === 'new' || t.status === 'deleted') continue;
       if (!isEmailChannel((t.via && t.via.channel) || '')) continue;
+      // Only count tickets where actual agent work happened today:
+      // - Solved today (agent closed it) OR
+      // - Created today (new ticket the agent is working)
+      // This excludes old tickets updated only by system triggers
+      // (e.g. Assisted Escalation, resolution tier changes, automation)
+      const solvedToday  = t.solved_at  && t.solved_at.slice(0, 10)  === today;
+      const createdToday = t.created_at && t.created_at.slice(0, 10) === today;
+      if (!solvedToday && !createdToday) continue;
       const prev = emailTicketStore.get(t.id);
       if (!prev) { added++; emailTicketStore.set(t.id, t); }
       else if (t.updated_at > prev.updated_at) emailTicketStore.set(t.id, t);
