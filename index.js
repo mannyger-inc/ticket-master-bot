@@ -223,7 +223,7 @@ async function fetchSolvedToday() {
   const date    = getGuadalajaraDate();
   const tickets = [];
   let   url     = `${ZD_BASE}/api/v2/search.json?query=${encodeURIComponent(
-    `type:ticket status:solved solved>=${date}`
+    `type:ticket status>pending solved>=${date}`
   )}&per_page=100`;
   let guard = 0;
   while (url && guard < 20) {
