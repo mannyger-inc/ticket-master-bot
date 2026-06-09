@@ -289,24 +289,31 @@ const auditCache = new Map(); // ticketId -> 'human' | 'system'
 async function isHumanSolved(ticketId) {
   if (auditCache.has(ticketId)) return auditCache.get(ticketId) === 'human';
   try {
+    // Fetch audits newest-first so today's activity is on the first page
     const res  = await fetch(
-      `https://${ZD_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticketId}/audits.json`,
+      `https://${ZD_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticketId}/audits.json?sort_order=desc`,
       { headers: { Authorization: 'Basic ' + Buffer.from(`${ZD_EMAIL}/token:${ZD_TOKEN}`).toString('base64') } }
     );
     const data = await res.json();
-    const audits     = (data.audits || []).slice().reverse();
-    const solveAudit = audits.find(a =>
-      (a.events || []).some(e => e.type === 'Change' && e.field_name === 'status' && e.value === 'solved')
-    );
-    if (!solveAudit) { auditCache.set(ticketId, 'human'); return true; }
-    const via      = solveAudit.via || {};
-    const src      = via.source || {};
-    const isSystem = via.channel === 'rule' || src.rel === 'trigger' || src.rel === 'automation';
-    auditCache.set(ticketId, isSystem ? 'system' : 'human');
-    return !isSystem;
+    const today = getGuadalajaraDate();
+    // A ticket counts if a human posted a public comment on it today.
+    // Checking the comment rather than the solve action avoids false positives
+    // where a Zendesk trigger fires "set status to solved" after an agent reply
+    // (in that case the solve event shows via.channel='rule' even though a
+    // human did the actual work).
+    const hasHumanCommentToday = (data.audits || []).some(audit => {
+      const auditDate = new Date(audit.created_at)
+        .toLocaleDateString('en-CA', { timeZone: 'America/Mexico_City' });
+      if (auditDate !== today) return false;
+      const ch = (audit.via && audit.via.channel) || '';
+      if (ch === 'rule') return false; // pure trigger/automation — no human
+      return (audit.events || []).some(e => e.type === 'Comment');
+    });
+    auditCache.set(ticketId, hasHumanCommentToday ? 'human' : 'system');
+    return hasHumanCommentToday;
   } catch (e) {
     console.error('[audit] ticket', ticketId, e.message);
-    auditCache.set(ticketId, 'human');
+    auditCache.set(ticketId, 'human'); // default to human on error
     return true;
   }
 }
