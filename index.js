@@ -519,7 +519,7 @@ async function runSOD() {
     const msg = [
       `🌅 *SOD — ${day}, ${date}*`,
       '',
-      `🎫 *Ticket Queue at 9:00 AM*`,
+      `🎫 *Ticket Queue at 8:00 AM*`,
       `  Unassigned (by date):    *${counts.unassignedDate}*`,
       `  Unassigned (round robin): *${counts.unassignedRR}*`,
       `  Open:                    *${counts.open}*`,
