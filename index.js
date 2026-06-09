@@ -939,6 +939,63 @@ app.post('/backfill-today', async (req, res) => {
   }
 });
 
+// Debug endpoint: compare raw Zendesk solved count vs what the bot processed.
+// Hit this tomorrow morning to diagnose the email count gap before touching any logic.
+app.get('/debug-count', async (req, res) => {
+  try {
+    const date  = getGuadalajaraDate();
+    const base  = Buffer.from(`${ZD_EMAIL}/token:${ZD_TOKEN}`).toString('base64');
+    const hdr   = { Authorization: 'Basic ' + base };
+
+    // 1. Raw Zendesk count — same query the bot uses
+    const q1  = encodeURIComponent(`type:ticket status:solved solved>=${date}`);
+    const r1  = await fetch(`https://${ZD_SUBDOMAIN}.zendesk.com/api/v2/search/count.json?query=${q1}`, { headers: hdr });
+    const d1  = await r1.json();
+
+    // 2. Also check status>pending for comparison
+    const q2  = encodeURIComponent(`type:ticket status>pending solved>=${date}`);
+    const r2  = await fetch(`https://${ZD_SUBDOMAIN}.zendesk.com/api/v2/search/count.json?query=${q2}`, { headers: hdr });
+    const d2  = await r2.json();
+
+    // 3. Check closed only
+    const q3  = encodeURIComponent(`type:ticket status:closed solved>=${date}`);
+    const r3  = await fetch(`https://${ZD_SUBDOMAIN}.zendesk.com/api/v2/search/count.json?query=${q3}`, { headers: hdr });
+    const d3  = await r3.json();
+
+    // 4. Fetch a sample of solved tickets and break down by channel
+    const q4  = encodeURIComponent(`type:ticket status:solved solved>=${date}`);
+    const r4  = await fetch(`https://${ZD_SUBDOMAIN}.zendesk.com/api/v2/search.json?query=${q4}&per_page=100`, { headers: hdr });
+    const d4  = await r4.json();
+    const channelBreakdown = {};
+    for (const t of (d4.results || [])) {
+      const ch = (t.via && t.via.channel) || 'unknown';
+      channelBreakdown[ch] = (channelBreakdown[ch] || 0) + 1;
+    }
+
+    // 5. Show what the bot's cache currently has
+    const cache = todayStatsCache;
+    const cacheAgentCount  = cache ? Object.keys(cache.agentStats || {}).length : 0;
+    const cacheTotals = cache ? Object.values(cache.agentStats || {}).reduce(
+      (acc, a) => ({ calls: acc.calls + a.calls, chats: acc.chats + a.chats, emails: acc.emails + a.emails }),
+      { calls: 0, chats: 0, emails: 0 }
+    ) : null;
+
+    res.json({
+      gdlDate:           date,
+      zendesk_solved:    d1.count,
+      zendesk_closed:    d3.count,
+      zendesk_both:      d2.count,
+      sample_channels:   channelBreakdown,
+      sample_size:       (d4.results || []).length,
+      bot_cache_agents:  cacheAgentCount,
+      bot_cache_totals:  cacheTotals,
+      note: 'zendesk_solved = status:solved only | zendesk_both = solved+closed | gap = zendesk_solved - bot totals'
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/health', (_req, res) => res.json({ ok: true, bot: 'ticket-master-bot' }));
 
 const PORT = process.env.PORT || 3000;
