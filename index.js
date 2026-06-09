@@ -961,6 +961,23 @@ app.post('/setup-hourly', async (req, res) => {
   } catch (e) { res.json({ ok: false, error: e.message }); }
 });
 
+// Backfill all completed hours for today into Hourly Stats sheet.
+// Run once after deploying the hourly architecture mid-day.
+app.post('/backfill-today', async (req, res) => {
+  res.json({ ok: true, message: 'Backfill started — check logs for progress' });
+  try {
+    const gdlHour = currentGDLHour();
+    console.log('[backfill] Current GDL hour:', gdlHour, '— writing slots 8 through', gdlHour - 1);
+    for (const [, label, hour] of HOURLY_SLOTS) {
+      if (hour >= gdlHour) break; // only completed hours
+      await writeHourlySlot(label, hour);
+    }
+    console.log('[backfill] Done');
+  } catch (e) {
+    console.error('[backfill] Error:', e.message);
+  }
+});
+
 app.get('/health', (_req, res) => res.json({ ok: true, bot: 'ticket-master-bot' }));
 
 const PORT = process.env.PORT || 3000;
