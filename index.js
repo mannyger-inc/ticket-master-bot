@@ -395,7 +395,7 @@ function currentGDLHour() { return getGDLHour(new Date().toISOString()); }
 async function readSheetTotalsToday(token) {
   const today = getGuadalajaraDate();
   try {
-    const data = await sheetsGet(token, 'Hourly Stats!A:J');
+    const data = await sheetsGet(token, "'Hourly Stats'!A:J");
     const totals = {};
     for (const row of (data.values || []).slice(1)) {
       if ((row[0] || '') !== today) continue;
@@ -428,7 +428,7 @@ async function writeHourlySlot(slotLabel, gdlHourNum) {
       .map(s => [date, slotLabel, s.name, s.email, s.supervisor, s.calls, s.chats, s.emails, s.calls + s.chats + s.emails, s.sales]);
     if (rows.length) {
       const token = await getGoogleAccessToken();
-      await sheetsAppend(token, 'Hourly Stats!A:J', rows);
+      await sheetsAppend(token, "'Hourly Stats'!A:J", rows);
       console.log('[hourly] Wrote', rows.length, 'rows for', slotLabel);
     }
   } catch (e) { console.error('[hourly] writeHourlySlot:', e.message); }
@@ -956,7 +956,7 @@ app.post('/setup-hourly', async (req, res) => {
     );
     const bd = await batchRes.json();
     if (bd.error && !bd.error.message.includes('already exists')) return res.json({ ok: false, error: bd.error.message });
-    await sheetsUpdate(token, 'Hourly Stats!A1:J1', [['Date','Slot','Agent','Email','Team','Calls','Chats','Emails','Total','Sales']]);
+    await sheetsUpdate(token, "'Hourly Stats'!A1:J1", [['Date','Slot','Agent','Email','Team','Calls','Chats','Emails','Total','Sales']]);
     res.json({ ok: true, message: 'Hourly Stats tab ready' });
   } catch (e) { res.json({ ok: false, error: e.message }); }
 });
