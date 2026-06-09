@@ -560,16 +560,16 @@ async function runEOD() {
     const date   = getGuadalajaraDate();
     const day    = getDayName();
 
-    // 2. Solved tickets analysis
-    const [solvedTickets] = await Promise.all([
-      fetchSolvedToday(),
-      pollEmailStore(),
-    ]);
-    const emailTickets = [...emailTicketStore.values()];
-    const idToEmail  = await resolveAssigneeEmails([...solvedTickets, ...emailTickets]);
-    const { agentStats, typeCount, channelDist } = analyzeTickets(solvedTickets, idToEmail);
-    const solvedIds  = new Set(solvedTickets.map(t => t.id));
-    countEmailsFromUpdated(emailTickets, solvedIds, idToEmail, agentStats);
+    // 2. Write final hour slot, then read full day from sheet
+    await writeHourlySlot('4-5', 16);
+    const sheetTotals = await readSheetTotalsToday(token);
+    const agentStats = {};
+    for (const [email, s] of Object.entries(sheetTotals)) agentStats[email] = { ...s };
+
+    // Get typeCount from today's solved tickets
+    const [solvedTickets] = await Promise.all([fetchSolvedToday(), pollEmailStore()]);
+    const idToEmail  = await resolveAssigneeEmails(solvedTickets);
+    const { typeCount, channelDist } = analyzeTickets(solvedTickets, idToEmail);
     const tickets = solvedTickets; // for total count in Slack message
 
     // 3. Write to Sheets
@@ -970,14 +970,4 @@ app.listen(PORT, () => {
   console.log(`[ticket-master-bot] Listening on port ${PORT}`);
   // Pre-warm today-stats cache immediately on startup so KB widget loads instantly
   warmTodayStatsCache().catch(e => console.error('[startup warm]', e.message));
-});    // Write final 4-5 PM slot then read full day from sheet
-    await writeHourlySlot('4-5', 16);
-    const sheetTotals = await readSheetTotalsToday(token);
-    const agentStats = {};
-    for (const [email, s] of Object.entries(sheetTotals)) agentStats[email] = { ...s };
-
-    // Also get typeCount from solved tickets
-    const [solvedTickets] = await Promise.all([fetchSolvedToday(), pollEmailStore()]);
-    const idToEmail = await resolveAssigneeEmails(solvedTickets);
-    const { typeCount, channelDist } = analyzeTickets(solvedTickets, idToEmail);
-    const tickets = solvedTickets;
+});
