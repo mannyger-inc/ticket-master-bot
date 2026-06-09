@@ -415,6 +415,16 @@ async function writeHourlySlot(slotLabel, gdlHourNum) {
   const date = getGuadalajaraDate();
   console.log('[hourly] Writing slot', slotLabel);
   try {
+    // Guard: skip if this slot was already written for today
+    const checkToken = await getGoogleAccessToken();
+    const existingData = await sheetsGet(checkToken, "'Hourly Stats'!A:B");
+    const alreadyExists = (existingData.values || []).some(
+      row => row[0] === date && row[1] === slotLabel
+    );
+    if (alreadyExists) {
+      console.log('[hourly] Slot', slotLabel, 'already written for', date, '— skipping');
+      return;
+    }
     const allSolved = await fetchSolvedToday();
     const slotSolved = allSolved.filter(t => getGDLHour(t.solved_at || t.updated_at) === gdlHourNum);
     const slotEmails = [...emailTicketStore.values()].filter(t => getGDLHour(t.updated_at) === gdlHourNum);
@@ -959,6 +969,62 @@ app.post('/setup-hourly', async (req, res) => {
     await sheetsUpdate(token, "'Hourly Stats'!A1:J1", [['Date','Slot','Agent','Email','Team','Calls','Chats','Emails','Total','Sales']]);
     res.json({ ok: true, message: 'Hourly Stats tab ready' });
   } catch (e) { res.json({ ok: false, error: e.message }); }
+});
+
+// Clear today's Hourly Stats rows and rewrite them cleanly.
+// Use this to fix duplicate data from running backfill multiple times.
+app.post('/reset-hourly-today', async (req, res) => {
+  res.json({ ok: true, message: 'Reset started — clears today\'s rows then backfills' });
+  try {
+    const today = getGuadalajaraDate();
+    const token = await getGoogleAccessToken();
+
+    // Read all rows to find today's entries
+    const data = await sheetsGet(token, "'Hourly Stats'!A:J");
+    const rows  = data.values || [];
+    if (rows.length <= 1) { console.log('[reset] No rows to clear'); return; }
+
+    // Delete rows in reverse so row numbers don't shift
+    // Use batchUpdate to delete specific rows (find 1-based row indices of today's data)
+    const todayRowIndices = [];
+    for (let i = 1; i < rows.length; i++) {
+      if ((rows[i][0] || '') === today) todayRowIndices.push(i + 1); // 1-based sheet row
+    }
+
+    if (todayRowIndices.length > 0) {
+      // Get the sheet ID for Hourly Stats tab
+      const metaRes = await fetch(
+        'https://sheets.googleapis.com/v4/spreadsheets/' + SHEET_ID,
+        { headers: { Authorization: 'Bearer ' + token } }
+      );
+      const meta = await metaRes.json();
+      const hourlySheet = (meta.sheets || []).find(s => s.properties.title === 'Hourly Stats');
+      const sheetTabId = hourlySheet ? hourlySheet.properties.sheetId : null;
+
+      if (sheetTabId !== null) {
+        // Build delete requests in reverse order (last row first)
+        const deleteRequests = todayRowIndices.slice().reverse().map(rowNum => ({
+          deleteDimension: {
+            range: { sheetId: sheetTabId, dimension: 'ROWS', startIndex: rowNum - 1, endIndex: rowNum }
+          }
+        }));
+        await fetch(
+          'https://sheets.googleapis.com/v4/spreadsheets/' + SHEET_ID + ':batchUpdate',
+          { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ requests: deleteRequests }) }
+        );
+        console.log('[reset] Deleted', todayRowIndices.length, 'rows for', today);
+      }
+    }
+
+    // Re-run backfill for completed hours
+    const gdlHour = currentGDLHour();
+    for (const [, label, hour] of HOURLY_SLOTS) {
+      if (hour >= gdlHour) break;
+      await writeHourlySlot(label, hour);
+    }
+    console.log('[reset] Backfill complete');
+  } catch (e) { console.error('[reset] Error:', e.message); }
 });
 
 // Backfill all completed hours for today into Hourly Stats sheet.
