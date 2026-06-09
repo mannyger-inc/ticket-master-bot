@@ -280,6 +280,55 @@ async function resolveAssigneeEmails(tickets) {
 
 
 // Group solved tickets into per-agent stats and ticket-type breakdown
+// ── Email Audit Cache ──────────────────────────────────────────────────────
+// Checks whether a ticket was solved by a human vs a system trigger/automation.
+// Results are cached permanently in memory — each ticket is only ever audited
+// once per bot uptime. First warm after deploy is the only slower run.
+const auditCache = new Map(); // ticketId -> 'human' | 'system'
+
+async function isHumanSolved(ticketId) {
+  if (auditCache.has(ticketId)) return auditCache.get(ticketId) === 'human';
+  try {
+    const res  = await fetch(
+      `https://${ZD_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticketId}/audits.json`,
+      { headers: { Authorization: 'Basic ' + Buffer.from(`${ZD_EMAIL}/token:${ZD_TOKEN}`).toString('base64') } }
+    );
+    const data = await res.json();
+    const audits     = (data.audits || []).slice().reverse();
+    const solveAudit = audits.find(a =>
+      (a.events || []).some(e => e.type === 'Change' && e.field_name === 'status' && e.value === 'solved')
+    );
+    if (!solveAudit) { auditCache.set(ticketId, 'human'); return true; }
+    const via      = solveAudit.via || {};
+    const src      = via.source || {};
+    const isSystem = via.channel === 'rule' || src.rel === 'trigger' || src.rel === 'automation';
+    auditCache.set(ticketId, isSystem ? 'system' : 'human');
+    return !isSystem;
+  } catch (e) {
+    console.error('[audit] ticket', ticketId, e.message);
+    auditCache.set(ticketId, 'human');
+    return true;
+  }
+}
+
+// Voice and chat tickets always pass through. Email/web tickets are checked
+// against the audit cache in batches of 10 to stay fast.
+async function filterHumanSolved(tickets) {
+  const calls  = tickets.filter(t => (t.via && t.via.channel) === 'voice');
+  const chats  = tickets.filter(t => (t.via && t.via.channel) === 'native_messaging');
+  const emails = tickets.filter(t => {
+    const ch = (t.via && t.via.channel) || '';
+    return ch !== 'voice' && ch !== 'native_messaging';
+  });
+  const verified = [];
+  for (let i = 0; i < emails.length; i += 10) {
+    const batch   = emails.slice(i, i + 10);
+    const results = await Promise.all(batch.map(t => isHumanSolved(t.id).then(ok => ok ? t : null)));
+    verified.push(...results.filter(Boolean));
+  }
+  return [...calls, ...chats, ...verified];
+}
+
 function analyzeTickets(tickets, idToEmail) {
   // Initialize stats for all known agents
   const agentStats = {};
@@ -402,8 +451,9 @@ async function writeHourlySlot(slotLabel, gdlHourNum) {
     const allSolved  = await fetchSolvedToday();
     const slotSolved = allSolved.filter(t => getGDLHour(t.solved_at || t.updated_at) === gdlHourNum);
     if (!slotSolved.length) { console.log('[hourly] No activity for', slotLabel); return; }
-    const idToEmail = await resolveAssigneeEmails(slotSolved);
-    const { agentStats } = analyzeTickets(slotSolved, idToEmail);
+    const cleanSolved = await filterHumanSolved(slotSolved);
+    const idToEmail   = await resolveAssigneeEmails(cleanSolved);
+    const { agentStats } = analyzeTickets(cleanSolved, idToEmail);
     const rows = Object.values(agentStats)
       .filter(s => s.calls + s.chats + s.emails + s.sales > 0)
       .map(s => [date, slotLabel, s.name, s.email, s.supervisor, s.calls, s.chats, s.emails, s.calls + s.chats + s.emails, s.sales]);
@@ -549,9 +599,10 @@ async function runEOD() {
 
     // Get typeCount from today's solved tickets
     const solvedTickets = await fetchSolvedToday();
-    const idToEmail  = await resolveAssigneeEmails(solvedTickets);
-    const { typeCount, channelDist } = analyzeTickets(solvedTickets, idToEmail);
-    const tickets = solvedTickets; // for total count in Slack message
+    const cleanTickets = await filterHumanSolved(solvedTickets);
+    const idToEmail    = await resolveAssigneeEmails(cleanTickets);
+    const { typeCount, channelDist } = analyzeTickets(cleanTickets, idToEmail);
+    const tickets = cleanTickets; // for total count in Slack message
 
     // 3. Write to Sheets
     const token  = await getGoogleAccessToken();
@@ -693,8 +744,9 @@ async function warmTodayStatsCache() {
     // 2. Current hour live data — solved tickets only (calls, chats, emails)
     const solvedTickets  = await fetchSolvedToday();
     const liveHourSolved = solvedTickets.filter(t => getGDLHour(t.solved_at || t.updated_at) === gdlHour);
-    const idToEmail      = await resolveAssigneeEmails(liveHourSolved);
-    const { agentStats: liveStats, typeCount, channelDist } = analyzeTickets(liveHourSolved, idToEmail);
+    const cleanLive      = await filterHumanSolved(liveHourSolved);
+    const idToEmail      = await resolveAssigneeEmails(cleanLive);
+    const { agentStats: liveStats, typeCount, channelDist } = analyzeTickets(cleanLive, idToEmail);
 
     // 3. Merge sheet + live
     const merged = {};
