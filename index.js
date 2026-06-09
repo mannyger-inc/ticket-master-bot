@@ -438,7 +438,7 @@ async function sheetsGet(token, range) {
 }
 
 async function sheetsAppend(token, range, values) {
-  const url = `${SHEETS_BASE}/${SHEET_ID}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
+  const url = `${SHEETS_BASE}/${SHEET_ID}/values/${encodeURIComponent(range)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`;
   const res = await fetch(url, {
     method:  'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -449,7 +449,7 @@ async function sheetsAppend(token, range, values) {
 }
 
 async function sheetsUpdate(token, range, values) {
-  const url = `${SHEETS_BASE}/${SHEET_ID}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`;
+  const url = `${SHEETS_BASE}/${SHEET_ID}/values/${encodeURIComponent(range)}?valueInputOption=RAW`;
   const res = await fetch(url, {
     method:  'PUT',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
