@@ -682,141 +682,8 @@ async function runEOD() {
 
 // ── Cron schedule (Guadalajara timezone) ─────────────────────────────────
 
-// ── Rippit Daily Sync ──────────────────────────────────────────────────────
-// Fetches yesterday's solved+closed tickets from Rippit, counts calls/chats/
-// emails per agent, writes to Agent Daily Stats sheet, and DMs Manny.
-// Runs at 8 AM Mon-Fri — Rippit syncs overnight so yesterday's data is ready.
-
-const RIPPIT_BASE   = 'https://app.rippit.com/api/v1';
-const RIPPIT_TOKEN  = process.env.RIPPIT_API_TOKEN || '';
-
-function rippitHeaders() {
-  return { 'Content-Type': 'application/json', 'apitoken': RIPPIT_TOKEN };
-}
-
-function getYesterdayGDL() {
-  const d = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Mexico_City' }));
-  d.setDate(d.getDate() - 1);
-  return d.toLocaleDateString('en-CA', { timeZone: 'America/Mexico_City' }); // YYYY-MM-DD
-}
-
-function agentNameFromAssignee(assignee) {
-  // "Customer Service/Romeo" -> "Romeo"
-  // "Supervisors/Jewel" -> "Jewel"
-  if (!assignee) return null;
-  const parts = assignee.split('/');
-  return parts[parts.length - 1].trim();
-}
-
-async function fetchRippitDayTickets(dateStr) {
-  // dateStr = "2026-06-09"
-  const start = `${dateStr}T00:00:00Z`;
-  const end   = `${dateStr}T23:59:59Z`;
-  const tickets = [];
-  let page = 1;
-  while (true) {
-    const url = `${RIPPIT_BASE}/tickets?solved_at_gte=${encodeURIComponent(start)}&solved_at_lte=${encodeURIComponent(end)}&status[]=solved&status[]=closed&limit=100&page=${page}`;
-    const res  = await fetch(url, { headers: rippitHeaders() });
-    if (!res.ok) {
-      console.error('[rippit] fetch failed', res.status, await res.text().catch(() => ''));
-      break;
-    }
-    const data = await res.json();
-    const batch = Array.isArray(data) ? data : (data.tickets || data.data || data.results || []);
-    if (!batch.length) break;
-    tickets.push(...batch);
-    if (batch.length < 100) break;
-    page++;
-  }
-  return tickets;
-}
-
-function countRippitTickets(tickets) {
-  const stats = {}; // name -> { calls, chats, emails, assignee }
-  for (const t of tickets) {
-    const assignee = t.searchable_assignee || t.assignee || '';
-    if (!assignee || assignee.includes('None') || assignee.includes('Supervisor')) continue;
-    const name = agentNameFromAssignee(assignee);
-    if (!name) continue;
-    const ch = (t.searchable_maestro_via_channel || t.channel || '').toLowerCase();
-    if (!stats[name]) stats[name] = { calls: 0, chats: 0, emails: 0, assignee };
-    if (ch === 'voice') stats[name].calls++;
-    else if (ch === 'native_messaging') stats[name].chats++;
-    else stats[name].emails++;
-  }
-  return stats;
-}
-
-async function runRippitDailySync() {
-  if (!RIPPIT_TOKEN) { console.log('[rippit] No token — skipping'); return; }
-  const yesterday = getYesterdayGDL();
-  console.log('[rippit] Syncing', yesterday);
-  try {
-    const tickets = await fetchRippitDayTickets(yesterday);
-    console.log('[rippit]', tickets.length, 'tickets for', yesterday);
-    const stats   = countRippitTickets(tickets);
-    const agents  = Object.keys(stats);
-
-    // Write to Agent Daily Stats sheet
-    const token = await getGoogleAccessToken();
-    const rows  = agents.sort().map(name => {
-      const s = stats[name];
-      return [yesterday, name, '', '', s.calls, s.chats, s.emails, s.calls + s.chats + s.emails, 0];
-    });
-    if (rows.length) {
-      await sheetsAppend(token, "'Agent Daily Stats'!A:I", rows);
-      console.log('[rippit] Wrote', rows.length, 'rows to Agent Daily Stats');
-    }
-
-    // Build Slack summary
-    const totals = agents.reduce((a, n) => ({
-      calls:  a.calls  + stats[n].calls,
-      chats:  a.chats  + stats[n].chats,
-      emails: a.emails + stats[n].emails,
-    }), { calls: 0, chats: 0, emails: 0 });
-
-    const top5 = agents.sort((a,b) =>
-      (stats[b].calls+stats[b].chats+stats[b].emails) - (stats[a].calls+stats[a].chats+stats[a].emails)
-    ).slice(0, 5);
-
-    const mannySLack = await fetch('https://slack.com/api/users.lookupByEmail?email=manuel.r%40incfile.com',
-      { headers: { Authorization: 'Bearer ' + process.env.SLACK_BOT_TOKEN } });
-    const mannyData = await mannySLack.json();
-    const mannyId   = mannyData.user && mannyData.user.id;
-
-    if (mannyId) {
-      const dmRes  = await fetch('https://slack.com/api/conversations.open', {
-        method: 'POST', headers: { Authorization: 'Bearer ' + process.env.SLACK_BOT_TOKEN, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ users: mannyId }),
-      });
-      const dmData = await dmRes.json();
-      const dmCh   = dmData.channel && dmData.channel.id;
-      if (dmCh) {
-        const lines = [
-          `📊 *Rippit Daily Sync — ${yesterday}*`,
-          ``,
-          `*Totals:* 📞 ${totals.calls} calls  💬 ${totals.chats} chats  📧 ${totals.emails} emails  *(${totals.calls+totals.chats+totals.emails} total)*`,
-          ``,
-          `*Top 5 agents:*`,
-          ...top5.map(n => `• ${n}: ${stats[n].calls+stats[n].chats+stats[n].emails} (📞${stats[n].calls} 💬${stats[n].chats} 📧${stats[n].emails})`),
-          ``,
-          `_${agents.length} agents written to Agent Daily Stats sheet_`,
-        ].join('\n');
-        await fetch('https://slack.com/api/chat.postMessage', {
-          method: 'POST', headers: { Authorization: 'Bearer ' + process.env.SLACK_BOT_TOKEN, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ channel: dmCh, text: lines }),
-        });
-        console.log('[rippit] DM sent to Manny');
-      }
-    }
-  } catch (e) {
-    console.error('[rippit] Error:', e.message);
-  }
-}
-
 cron.schedule('0 8 * * 1-5',  runSOD, { timezone: 'America/Mexico_City' });
 cron.schedule('0 17 * * 1-5', runEOD, { timezone: 'America/Mexico_City' });
-cron.schedule('5 8 * * 1-5', runRippitDailySync, { timezone: 'America/Mexico_City' });
 
 
 async function warmTodayStatsCache() {
@@ -1077,11 +944,6 @@ app.post('/backfill-today', async (req, res) => {
 
 // Debug endpoint: compare raw Zendesk solved count vs what the bot processed.
 // Hit this tomorrow morning to diagnose the email count gap before touching any logic.
-app.post('/rippit-sync', async (req, res) => {
-  res.json({ ok: true, message: 'Rippit sync started — check logs and Slack DM' });
-  runRippitDailySync().catch(e => console.error('[rippit-sync endpoint]', e.message));
-});
-
 app.get('/debug-count', async (req, res) => {
   try {
     const date  = getGuadalajaraDate();
