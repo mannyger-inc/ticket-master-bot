@@ -89,6 +89,7 @@ const AGENTS = [
   { name: 'Venancio',   email: 'venancio.s@incfile.com',    supervisor: 'Jose H'    },
   { name: 'Yunueth',    email: 'yunueth.r@incfile.com',     supervisor: 'Diana O'   },
 ];
+const AGENT_EMAILS = new Set(AGENTS.map(a => a.email.toLowerCase()));
 
 // Fast lookup: lowercase email → agent
 const AGENT_BY_EMAIL = {};
@@ -713,6 +714,7 @@ async function warmTodayStatsCache() {
 
     const agentRows = {};
     for (const [email, s] of Object.entries(merged)) {
+      if (!AGENT_EMAILS.has(email.toLowerCase())) continue;
       const total = s.calls + s.chats + s.emails;
       if (total > 0 || s.sales > 0) agentRows[email] = { ...s, total };
     }
@@ -823,9 +825,10 @@ app.get('/today-stats', async (req, res) => {
     const idToEmail = await resolveAssigneeEmails(tickets);
     const { agentStats, typeCount, channelDist } = analyzeTickets(tickets, idToEmail);
 
-    // Build clean response: only agents with activity
+    // Build clean response: only known agents with activity
     const agentRows = {};
     Object.entries(agentStats).forEach(([email, s]) => {
+      if (!AGENT_EMAILS.has(email.toLowerCase())) return;
       const total = s.calls + s.chats + s.emails;
       if (total > 0 || s.sales > 0) {
         agentRows[email] = {
